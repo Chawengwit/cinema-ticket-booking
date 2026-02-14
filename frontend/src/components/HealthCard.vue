@@ -23,7 +23,7 @@
 
 <template>
     <div class="mx-auto max-w-3xl rounded-2xl bg-white p-6 shadow">
-        <div class="flex items-center justify-between">
+        <div class="flex flex-col items-left justify-between">
             <h1 class="text-2xl font-bold tracking-tight">Cinema Ticket Booking</h1>
             <span class="round-full bg-emerald-50 px-3 py-1 text-sm font-medium text-emerald-700">what movie you love?</span>
             
