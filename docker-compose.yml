@@ -5,27 +5,43 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    restart: unless-stopped
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    restart: unless-stopped
 
   backend:
-    build: ./backend
-    env_file: .env
+    build:
+      context: ./backend
+    env_file:
+      - ./.env
     ports:
       - "8080:8080"
+    environment:
+      - GIN_MODE=debug
     depends_on:
       - mongo
       - redis
+    restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: dev
     ports:
       - "5173:5173"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - VITE_IN_DOCKER=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     depends_on:
       - backend
+    restart: unless-stopped
 
 volumes:
   mongo_data:
