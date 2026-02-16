@@ -37,6 +37,18 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 - ⏳ In progress: domain models (Movie, Showtime, Seat, Booking), REST APIs, WebSocket gateway, Google OAuth callback, Redis lock helpers, audit log writer.
 - 🔜 Upcoming: Admin dashboard views, notification worker, Postman collection, happy-path integration tests.
 
+## Delivery Roadmap & Checkpoints
+| # | Checkpoint | Target Outcome | Status |
+| - | --- | --- | --- |
+| 1 | Docker compose up + frontend hitting `/health` (no OAuth yet) | One-command compose brings up Mongo/Redis/backend/frontend; SPA proxies `/api/health`. | ✅ Completed (compose + health card live).
+| 2 | Backend connects to Mongo + Redis with env-driven config | Config loader enforces `MONGO_URI`/`REDIS_ADDR`; API establishes connections on boot. | ✅ Completed (see `internal/config`, `internal/db`, `internal/cache`).
+| 3 | Google OAuth 2.0 + JWT + role middleware | OAuth callback issuing JWT with USER/ADMIN roles; middleware guards admin routes. | ⏳ Planned.
+| 4 | Seat lock API with 5-minute Redis TTL + double-lock guard | Endpoints to lock seats, enforce TTL, prevent duplicate holds. | ⏳ Planned.
+| 5 | WebSocket broadcast for seat status changes | Real-time push (WS/SSE) wired to Redis Pub/Sub for seat map updates. | ⏳ Planned.
+| 6 | Booking confirmation (mock payment) → BOOKED + Pub/Sub event | Finalize booking, persist to Mongo, emit success event for notifications. | ⏳ Planned.
+| 7 | Timeout handling + seat release + audit logs | Background/job flow to release expired locks, log timeouts/errors, persist audits. | ⏳ Planned.
+| 8 | Admin dashboard with filters | Vue admin surface for bookings + filters, audit log stream, role guarding. | ⏳ Planned.
+
 ## Running the Stack
 ### 1. Prerequisites
 - Docker Desktop 4.30+ (or compatible engine) with `docker compose` v2.
