@@ -1,0 +1,45 @@
+# macOS / OS noise
+.DS_Store
+
+# IDE & editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+
+# Go build outputs & coverage
+/backend/bin/
+/backend/build/
+/backend/dist/
+/backend/tmp/
+/backend/coverage/
+*.test
+*.out
+coverage.txt
+
+# Node / Vite artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment overrides (keep committed base .env if desired)
+.env
+.env.local
+.env.*.local
+.envrc
+
+# Logs & temp data
+*.log
+tmp/
+/tmp/
+
+# Docker / tooling
+docker-data/
+mongo_data/
