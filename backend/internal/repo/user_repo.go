@@ -1,0 +1,49 @@
+package repo
+
+import (
+	"cinema/internal/model"
+	"context"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+type UserRepo struct {
+	col *mongo.Collection
+}
+
+func NewUserRepo(db *mongo.Database) *UserRepo {
+	return &UserRepo{
+		col: db.Collection("users"),
+	}
+}
+
+// Upsert by google_id
+func (r *UserRepo) UpsertGoogleUser(ctx context.Context, googleID, email, name, picture string) (*model.User, error) {
+	now := time.Now()
+
+	update := bson.M{
+		"$set": bson.M{
+			"email":      email,
+			"name":       name,
+			"picture":    picture,
+			"updated_at": now,
+		},
+		"$setOnInsert": bson.M{
+			"google_id":  googleID,
+			"role":       model.RoleUser, //default
+			"created_at": now,
+		},
+	}
+
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+	var out model.User
+	if err := r.col.FindOneAndUpdate(ctx, bson.M{"google_id": googleID}, update, opts).Decode(&out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
