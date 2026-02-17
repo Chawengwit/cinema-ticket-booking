@@ -23,6 +23,10 @@ func key(showtimeID, seatID string) string {
 	return fmt.Sprintf("seatlock:%s:%s", showtimeID, seatID)
 }
 
+func bookedKey(showtimeID, seatID string) string {
+	return fmt.Sprintf("seatbooked:%s:%s", showtimeID, seatID)
+}
+
 type LockInfo struct {
 	SeatID     string `json:"seat_id"`
 	Owner      string `json:"owner"`
@@ -154,6 +158,112 @@ func (s *Service) ReleaseSeats(ctx context.Context, showtimeID string, seatIDs [
 	return nil
 }
 
+// Confirm booking atomically:
+// - If any seat is already booked => already_booked
+// - Else require all locks exist AND owned by owner:requestId
+// - Then SET bookedKey = bookingId and DEL lock keys
+//
+// KEYS layout: [1..n] lock keys, [n+1..2n] booked keys
+var luaConfirmBooked = redis.NewScript(`
+local owner = ARGV[1]
+local rid = ARGV[2]
+local bookingId = ARGV[3]
+local n = tonumber(ARGV[4])
+
+local expected = owner .. ":" .. rid
+
+-- ✅ First: if any seat already booked, return already_booked
+for i=1,n do
+  local bookedK = KEYS[n+i]
+  if redis.call("EXISTS", bookedK) == 1 then
+    return {0, bookedK, "already_booked"}
+  end
+end
+
+-- Second: validate locks exist and owned by same owner+rid
+for i=1,n do
+  local lockK = KEYS[i]
+  local v = redis.call("GET", lockK)
+  if (not v) then
+    return {0, lockK, "missing_lock"}
+  end
+  if v ~= expected then
+    return {0, lockK, "not_owner"}
+  end
+end
+
+-- Finalize: mark booked + delete locks
+for i=1,n do
+  local lockK = KEYS[i]
+  local bookedK = KEYS[n+i]
+  redis.call("SET", bookedK, bookingId)
+  redis.call("DEL", lockK)
+end
+
+return {1, "", ""}
+`)
+
+func (s *Service) ConfirmSeatsBooked(
+	ctx context.Context,
+	showtimeID string,
+	seatIDs []string,
+	owner string,
+	requestID string,
+	bookingID string,
+) (ok bool, conflictedSeatID string, reason string, err error) {
+	if len(seatIDs) == 0 {
+		return false, "", "invalid_seat_ids", fmt.Errorf("seatIDs required")
+	}
+	if owner == "" || requestID == "" || bookingID == "" {
+		return false, "", "invalid_args", fmt.Errorf("owner/requestID/bookingID required")
+	}
+
+	keys := make([]string, 0, len(seatIDs)*2)
+	for _, sid := range seatIDs {
+		keys = append(keys, key(showtimeID, sid))
+	}
+	for _, sid := range seatIDs {
+		keys = append(keys, bookedKey(showtimeID, sid))
+	}
+
+	res, err := luaConfirmBooked.Run(ctx, s.rdb, keys, owner, requestID, bookingID, len(seatIDs)).Result()
+	if err != nil {
+		return false, "", "redis_failed", err
+	}
+
+	arr, okArr := res.([]any)
+	if !okArr || len(arr) < 3 {
+		return false, "", "unexpected_lua_result", fmt.Errorf("unexpected lua result: %T", res)
+	}
+
+	okInt, _ := arr[0].(int64)
+	if okInt == 1 {
+		s.publish(ctx, SeatEvent{
+			Type:       "booked",
+			ShowtimeID: showtimeID,
+			SeatIDs:    seatIDs,
+			Owner:      owner,
+			RequestID:  requestID,
+			BookingID:  bookingID,
+			At:         time.Now().Unix(),
+		})
+		return true, "", "", nil
+	}
+
+	confKey, _ := arr[1].(string)
+	reason, _ = arr[2].(string)
+
+	// extract seat id from key
+	if strings.HasPrefix(confKey, "seatlock:") || strings.HasPrefix(confKey, "seatbooked:") {
+		parts := strings.Split(confKey, ":")
+		if len(parts) >= 3 {
+			return false, parts[len(parts)-1], reason, nil
+		}
+	}
+
+	return false, confKey, reason, nil
+}
+
 // Debug/dev: list current locks for showtime + ttl remaining
 func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo, error) {
 	pattern := fmt.Sprintf("seatlock:%s:*", showtimeID)
@@ -223,11 +333,12 @@ func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo,
 }
 
 type SeatEvent struct {
-	Type       string   `json:"type"` // "locked" | "released"
+	Type       string   `json:"type"` // "locked" | "released" | "booked"
 	ShowtimeID string   `json:"showtime_id"`
 	SeatIDs    []string `json:"seat_ids"`
 	Owner      string   `json:"owner"`
 	RequestID  string   `json:"request_id,omitempty"`
+	BookingID  string   `json:"booking_id,omitempty"`
 	At         int64    `json:"at"` // unix seconds
 }
 

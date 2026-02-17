@@ -51,6 +51,10 @@ func main() {
 	seatLockSvc := seatlock.New(redisClient, seatTTL)
 	seatLockHandler := handler.NewSeatLockHandler(seatLockSvc, cfg.SeatLockTTLSeconds)
 
+	// Booking
+	bookingRepo := repo.NewBookingRepo(mongoConn.DB)
+	bookingHandler := handler.NewBookingHandler(seatLockSvc, bookingRepo, redisClient)
+
 	// router
 	r := gin.Default()
 	_ = r.SetTrustedProxies(nil)
@@ -131,6 +135,10 @@ func main() {
 		st.POST("/seats/lock", seatLockHandler.Lock)
 		st.DELETE("/seats/lock", seatLockHandler.Release)
 		st.GET("/seats/locks", seatLockHandler.ListLocks)
+
+		// Booking
+		st.POST("/bookings/confirm", bookingHandler.Confirm)
+
 	}
 
 	// WebSocket
