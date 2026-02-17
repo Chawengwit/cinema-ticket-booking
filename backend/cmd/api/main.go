@@ -43,6 +43,9 @@ func main() {
 	jwtSvc := auth.NewJWTService(cfg.JWTSecret)
 	userRepo := repo.NewUserRepo(mongoConn.DB)
 
+	// WebSocket
+	seatWS := handler.NewSeatWSHandler(redisClient, jwtSvc)
+
 	// SeatLock service
 	seatTTL := time.Duration(cfg.SeatLockTTLSeconds) * time.Second
 	seatLockSvc := seatlock.New(redisClient, seatTTL)
@@ -129,6 +132,9 @@ func main() {
 		st.DELETE("/seats/lock", seatLockHandler.Release)
 		st.GET("/seats/locks", seatLockHandler.ListLocks)
 	}
+
+	// WebSocket
+	r.GET("/ws/showtimes/:showtimeId/seats", seatWS.Seats)
 
 	_ = r.Run(":" + cfg.Port)
 }

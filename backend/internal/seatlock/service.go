@@ -2,6 +2,7 @@ package seatlock
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -88,6 +89,14 @@ func (s *Service) LockSeats(ctx context.Context, showtimeID string, seatIDs []st
 
 	okInt, _ := arr[0].(int64)
 	if okInt == 1 {
+		s.publish(ctx, SeatEvent{
+			Type:       "locked",
+			ShowtimeID: showtimeID,
+			SeatIDs:    seatIDs,
+			Owner:      owner,
+			RequestID:  requestID,
+			At:         time.Now().Unix(),
+		})
 		return true, "", nil
 	}
 
@@ -131,7 +140,18 @@ func (s *Service) ReleaseSeats(ctx context.Context, showtimeID string, seatIDs [
 	}
 
 	_, err := luaReleaseOwned.Run(ctx, s.rdb, keys, owner).Result()
-	return err
+	if err != nil {
+		return err
+	}
+
+	s.publish(ctx, SeatEvent{
+		Type:       "released",
+		ShowtimeID: showtimeID,
+		SeatIDs:    seatIDs,
+		Owner:      owner,
+		At:         time.Now().Unix(),
+	})
+	return nil
 }
 
 // Debug/dev: list current locks for showtime + ttl remaining
@@ -200,4 +220,26 @@ func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo,
 	}
 
 	return out, nil
+}
+
+type SeatEvent struct {
+	Type       string   `json:"type"` // "locked" | "released"
+	ShowtimeID string   `json:"showtime_id"`
+	SeatIDs    []string `json:"seat_ids"`
+	Owner      string   `json:"owner"`
+	RequestID  string   `json:"request_id,omitempty"`
+	At         int64    `json:"at"` // unix seconds
+}
+
+func channel(showtimeID string) string {
+	return fmt.Sprintf("seat-events:%s", showtimeID)
+}
+
+func (s *Service) publish(ctx context.Context, ev SeatEvent) {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	// best-effort publish (ไม่ทำให้ API fail ถ้า pubsub มีปัญหา)
+	_ = s.rdb.Publish(ctx, channel(ev.ShowtimeID), b).Err()
 }

@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import NavBar from "./components/NavBar.vue";
+import SeatEventsCard from "./components/SeatEventsCard.vue"
 import HealthCard from "./components/HealthCard.vue";
 
 const AUTH_KEY = "access_token";
@@ -113,6 +114,7 @@ onMounted(() => {
         <p v-if="error" class="mt-3 text-sm text-red-600">{{ error }}</p>
       </div>
 
+      <SeatEventsCard />
       <HealthCard />
     </main>
   </div>
