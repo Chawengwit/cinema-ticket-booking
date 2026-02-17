@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -33,7 +34,7 @@ func (r *UserRepo) UpsertGoogleUser(ctx context.Context, googleID, email, name, 
 		},
 		"$setOnInsert": bson.M{
 			"google_id":  googleID,
-			"role":       model.RoleUser, //default
+			"role":       model.RoleUser, // default
 			"created_at": now,
 		},
 	}
@@ -42,6 +43,21 @@ func (r *UserRepo) UpsertGoogleUser(ctx context.Context, googleID, email, name, 
 
 	var out model.User
 	if err := r.col.FindOneAndUpdate(ctx, bson.M{"google_id": googleID}, update, opts).Decode(&out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
+}
+
+// find user by Mongo _id (hex)
+func (r *UserRepo) FindByID(ctx context.Context, idHex string) (*model.User, error) {
+	oid, err := primitive.ObjectIDFromHex(idHex)
+	if err != nil {
+		return nil, err
+	}
+
+	var out model.User
+	if err := r.col.FindOne(ctx, bson.M{"_id": oid}).Decode(&out); err != nil {
 		return nil, err
 	}
 

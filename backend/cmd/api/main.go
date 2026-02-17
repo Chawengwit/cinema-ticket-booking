@@ -80,11 +80,29 @@ func main() {
 		authGroup.GET("/login", ga.Login)
 		authGroup.GET("/callback", ga.Callback)
 
+		// return user profile (not only user_id/role)
 		api.GET("/me", middleware.AuthRequired(jwtSvc), func(c *gin.Context) {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+			defer cancel()
+
+			uid := c.GetString(middleware.CtxUserID)
+
+			u, err := userRepo.FindByID(ctx, uid)
+			if err != nil {
+				c.JSON(500, gin.H{"ok": false, "error": "db_failed"})
+				return
+			}
+
 			c.JSON(200, gin.H{
-				"ok":      true,
-				"user_id": c.GetString(middleware.CtxUserID),
-				"role":    c.GetString(middleware.CtxRole),
+				"ok":   true,
+				"role": string(u.Role),
+				"user": gin.H{
+					"id":      u.ID.Hex(),
+					"email":   u.Email,
+					"name":    u.Name,
+					"picture": u.Picture,
+					"role":    string(u.Role),
+				},
 			})
 		})
 

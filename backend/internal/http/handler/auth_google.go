@@ -52,7 +52,6 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 			"ok":    false,
 			"error": "missing_code",
 		})
-
 		return
 	}
 
@@ -61,10 +60,8 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 
 	tok, err := h.oauth.Exchange(ctx, code)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"ok":    false,
-			"error": "exchange_failed",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "exchange_failed"})
+		return
 	}
 
 	// get userinfo
@@ -75,7 +72,6 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 			"ok":    false,
 			"error": "userinfo_failed",
 		})
-
 		return
 	}
 	defer res.Body.Close()
@@ -98,7 +94,6 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 			"ok":    false,
 			"error": "db_failed",
 		})
-
 		return
 	}
 
@@ -109,11 +104,9 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 			"error":  "jwt_failed",
 			"detail": err.Error(),
 		})
-
 		return
 	}
 
 	// redirect to FE with token
 	c.Redirect(http.StatusFound, h.frontendURL+"/auth/callback?token="+jwtToken)
-
 }
