@@ -13,7 +13,12 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 .
 ├── backend              # Go services (Gin API, Mongo, Redis clients)
 │   ├── cmd/api          # HTTP entrypoint
-│   └── internal         # config, db, cache packages
+│   └── internal         # Application packages
+│       ├── config       # Env configuration
+│       ├── domain       # Core business entities (Movie, Showtime, Booking)
+│       ├── repository   # MongoDB implementations
+│       ├── db           # Mongo connection setup
+│       └── cache        # Redis connection setup
 ├── frontend             # Vue 3 + Vite SPA (seat map, admin console)
 ├── docker-compose.yml   # Orchestrates mongo, redis, backend, frontend
 └── .env                 # Local configuration (never commit secrets)
@@ -126,7 +131,7 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 | Optional (Postman/Test/Notification) | Partially planned | Postman + mock notifier to be added alongside first functional endpoint. |
 
 ## Next Steps
-1. Implement Mongo repositories + domain aggregates for Movie/Showtime/Seat/Booking.
+1. **[IN PROGRESS]** Implement Mongo repositories + domain aggregates (See `docs/TASK_01_DOMAIN_MODELS.md`).
 2. Build OAuth controllers and session middleware; add JWT signer/validator.
 3. Deliver seat map WebSocket channel + Redis Pub/Sub broadcaster.
 4. Flesh out booking + payment endpoints with lock lifecycle + audit hooks.
