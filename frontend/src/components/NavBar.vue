@@ -1,40 +1,31 @@
 <template>
-  <header class="sticky top-0 z-50 border-b bg-white/80 backdrop-blur">
-    <nav class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-      <div class="font-bold">Cinema Ticket</div>
+  <header class="sticky top-0 z-50 border-b border-white/5 bg-slate-900/70 backdrop-blur-xl">
+    <nav class="container-wide flex items-center justify-between py-3">
+      <div class="flex items-center gap-3">
+        <span class="flex h-10 w-10 items-center justify-center rounded-2xl bg-[var(--color-primary)]/20 text-lg font-bold text-[var(--color-primary)] ring-1 ring-[var(--color-primary)]/30">
+          CT
+        </span>
+        <div>
+          <p class="text-sm font-semibold text-white">Cinema Ticket</p>
+          <p class="text-xs text-slate-400">Real-time seat locking</p>
+        </div>
+      </div>
 
       <div class="flex items-center gap-3">
         <div v-if="isAuthed" class="hidden sm:block text-right">
-          <p class="text-sm font-medium text-gray-900">
+          <p class="text-sm font-semibold text-white flex items-center gap-2 justify-end">
             {{ displayName }}
-            <span
-              class="ml-2 rounded-full border px-2 py-0.5 text-xs font-semibold"
-              :class="rolePillClass"
-              title="Role"
-            >
-              {{ roleText }}
-            </span>
+            <span class="pill" :class="rolePillClass" title="Role">{{ roleText }}</span>
           </p>
-          <p class="text-xs text-gray-500">{{ displayEmail }}</p>
+          <p class="text-xs text-slate-400">{{ displayEmail }}</p>
         </div>
 
-        <span v-if="loading" class="hidden sm:inline text-xs text-gray-500">Loading...</span>
+        <span v-if="loading" class="hidden sm:inline text-xs text-slate-400">Loading...</span>
 
-        <!-- Login -->
-        <button
-          v-if="!isAuthed"
-          @click="doLogin"
-          class="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-800 active:scale-[0.99]"
-        >
+        <button v-if="!isAuthed" @click="doLogin" class="btn btn-primary">
           Sign in with Google
         </button>
-
-        <!-- Logout -->
-        <button
-          v-else
-          @click="doLogout"
-          class="inline-flex items-center rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 active:scale-[0.99]"
-        >
+        <button v-else @click="doLogout" class="btn btn-secondary">
           Logout
         </button>
       </div>
@@ -65,8 +56,8 @@ const displayEmail = computed(() => props.user?.email ?? "");
 const roleText = computed(() => props.role ?? "USER");
 const rolePillClass = computed(() =>
   roleText.value === "ADMIN"
-    ? "border-amber-300 bg-amber-50 text-amber-700"
-    : "border-emerald-300 bg-emerald-50 text-emerald-700"
+    ? "text-amber-300 border border-amber-300/40"
+    : "text-emerald-300 border border-emerald-300/40"
 );
 
 function doLogin() {

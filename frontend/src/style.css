@@ -1,3 +1,123 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-primary: #2563eb;
+    --color-primary-strong: #1d4ed8;
+    --color-secondary: #0ea5e9;
+    --color-success: #16a34a;
+    --color-warning: #f59e0b;
+    --color-error: #dc2626;
+    --color-surface: #0b1224;
+    --color-card: #0f172a;
+    --color-muted: #94a3b8;
+    --color-border: #1f2937;
+    --radius-lg: 18px;
+    --radius-md: 12px;
+    --shadow-soft: 0 10px 35px rgba(15, 23, 42, 0.25);
+  }
+
+  body {
+    @apply bg-slate-900 text-slate-50;
+    font-family: "Manrope", system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.01em;
+  }
+}
+
+@layer components {
+  .page-shell {
+    @apply min-h-screen bg-gradient-to-b from-slate-900 via-slate-900 to-slate-900;
+  }
+
+  .container-wide {
+    @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
+  }
+
+  .card {
+    @apply rounded-2xl bg-slate-900/80 p-6 shadow-xl ring-1 ring-white/5 backdrop-blur;
+    box-shadow: var(--shadow-soft);
+  }
+
+  .card-muted {
+    @apply rounded-2xl bg-slate-900/60 p-6 ring-1 ring-white/5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary-strong)] focus-visible:outline-[var(--color-primary)];
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 bg-white/10 text-white hover:bg-white/20 focus-visible:outline-white;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 bg-transparent text-slate-200 hover:bg-white/10 focus-visible:outline-white;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 bg-[var(--color-error)] text-white hover:bg-red-700 focus-visible:outline-red-500;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-slate-500 transition focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/50;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide;
+  }
+  .badge-primary {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide bg-[var(--color-primary)]/15 text-[var(--color-primary)];
+  }
+  .badge-success {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide bg-[var(--color-success)]/15 text-[var(--color-success)];
+  }
+  .badge-warning {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide bg-[var(--color-warning)]/15 text-[var(--color-warning)];
+  }
+  .badge-error {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide bg-[var(--color-error)]/15 text-[var(--color-error)];
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 ring-1 ring-white/10;
+  }
+
+  .table-shell {
+    @apply overflow-hidden rounded-2xl ring-1 ring-white/10 shadow-xl;
+  }
+  .table {
+    @apply w-full text-left text-sm text-slate-100;
+  }
+  .table thead th {
+    @apply sticky top-0 bg-slate-900/90 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 backdrop-blur;
+  }
+  .table tbody tr:nth-child(odd) {
+    @apply bg-slate-900/50;
+  }
+  .table tbody tr:nth-child(even) {
+    @apply bg-slate-900/30;
+  }
+  .table tbody tr:hover {
+    @apply bg-slate-800/60;
+  }
+  .table td {
+    @apply px-4 py-3 align-top;
+  }
+
+  .section-title {
+    @apply text-lg font-semibold text-white;
+  }
+  .section-subtitle {
+    @apply text-sm text-slate-400;
+  }
+
+  .alert {
+    @apply rounded-xl border px-4 py-3 text-sm;
+  }
+  .alert-error {
+    @apply rounded-xl border px-4 py-3 text-sm border-red-500/30 bg-red-500/10 text-red-200;
+  }
+  .alert-info {
+    @apply rounded-xl border px-4 py-3 text-sm border-white/10 bg-white/5 text-slate-200;
+  }
+}

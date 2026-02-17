@@ -1,0 +1,616 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+
+const props = defineProps<{
+  apiOrigin: string;
+  authKey: string;
+  isAuthed: boolean;
+}>();
+
+type Movie = {
+  id: string;
+  title: string;
+  duration?: string;
+  rating?: string;
+  tags?: string[];
+  showtimes: { id: string; label: string }[];
+};
+
+// ✅ showtime_id ที่มีจริง
+const movies = ref<Movie[]>([
+  {
+    id: "MOV1",
+    title: "Demo Movie A",
+    duration: "2h 10m",
+    rating: "PG-13",
+    tags: ["Demo"],
+    showtimes: [
+      { id: "SHOW1", label: "SHOW1 • Demo Showtime" },
+      { id: "SHOW2", label: "SHOW2 • Demo Showtime" },
+    ],
+  },
+  {
+    id: "MOV2",
+    title: "Demo Movie B",
+    duration: "1h 55m",
+    rating: "PG",
+    tags: ["Demo"],
+    showtimes: [{ id: "demo-001", label: "demo-001 • Demo Showtime" }],
+  },
+]);
+
+type Step = "pick_movie" | "pick_seats" | "pay" | "done";
+const step = ref<Step>("pick_movie");
+
+const selectedMovieId = ref("");
+const selectedShowtimeId = ref("");
+
+const selectedMovie = computed(() => movies.value.find((m) => m.id === selectedMovieId.value) || null);
+const showtimes = computed(() => selectedMovie.value?.showtimes || []);
+
+const token = computed(() => localStorage.getItem(props.authKey) || "");
+function authHeaders(): HeadersInit {
+  return token.value ? { Authorization: `Bearer ${token.value}` } : {};
+}
+function wsBase(url: string) {
+  return url.replace(/^http/, "ws");
+}
+
+// ===== seats =====
+type SeatStatus = "FREE" | "LOCKED" | "BOOKED";
+type Seat = { id: string; row: string; num: number; status: SeatStatus; owner?: string; ttl?: number };
+
+const seatRows = ["A", "B", "C", "D", "E"];
+const seatCols = 10;
+
+function buildSeats(): Seat[] {
+  const out: Seat[] = [];
+  for (const r of seatRows) for (let n = 1; n <= seatCols; n++) out.push({ id: `${r}${n}`, row: r, num: n, status: "FREE" });
+  return out;
+}
+
+const seats = ref<Seat[]>(buildSeats());
+
+// picked = เลือกในหน้า pick_seats (ยังไม่ล็อก)
+const picked = ref<string[]>([]);
+
+// lockedSeats = ชุดที่ “ล็อกแล้ว” และกำลังจะจ่าย
+const lockedSeats = ref<string[]>([]);
+
+const busy = ref(false);
+const error = ref<string | null>(null);
+
+const wsConnected = ref(false);
+const wsLogs = ref<string[]>([]);
+let ws: WebSocket | null = null;
+
+const lockRequestId = ref<string>(""); // ✅ ใช้ของ backend
+const paymentRef = ref("");
+const bookingId = ref("");
+const doneMessage = ref("");
+
+function resetFlow() {
+  step.value = "pick_movie";
+  selectedMovieId.value = "";
+  selectedShowtimeId.value = "";
+  seats.value = buildSeats();
+  picked.value = [];
+  lockedSeats.value = [];
+  lockRequestId.value = "";
+  paymentRef.value = "";
+  bookingId.value = "";
+  doneMessage.value = "";
+  error.value = null;
+  wsLogs.value = [];
+  disconnectWS();
+}
+
+function genPaymentRef() {
+  return "PAY-" + Math.random().toString(16).slice(2).toUpperCase();
+}
+
+function seatClass(s: Seat) {
+  const isPicked = picked.value.includes(s.id);
+  const isLockedForPay = lockedSeats.value.includes(s.id);
+
+  const base = "h-10 w-10 rounded-xl text-xs font-semibold flex items-center justify-center select-none ring-1 transition";
+
+  if (s.status === "BOOKED")
+    return `${base} bg-rose-500/15 text-rose-200 ring-rose-400/20 cursor-not-allowed`;
+
+  // “LOCKED (ME)” highlight
+  if (isLockedForPay)
+    return `${base} bg-emerald-500/18 text-emerald-200 ring-emerald-400/25 cursor-not-allowed`;
+
+  if (s.status === "LOCKED")
+    return `${base} bg-amber-500/15 text-amber-200 ring-amber-400/20 cursor-not-allowed`;
+
+  if (isPicked)
+    return `${base} bg-emerald-500/20 text-emerald-200 ring-emerald-400/30 hover:bg-emerald-500/25 cursor-pointer`;
+
+  return `${base} bg-white/5 text-white ring-white/10 hover:bg-white/10 cursor-pointer`;
+}
+
+function toggleSeat(id: string) {
+  const s = seats.value.find((x) => x.id === id);
+  if (!s) return;
+
+  if (step.value !== "pick_seats") return;
+  if (s.status !== "FREE") return;
+
+  const idx = picked.value.indexOf(id);
+  if (idx >= 0) picked.value.splice(idx, 1);
+  else picked.value.push(id);
+}
+
+// =======================
+// ✅ Refresh current locks
+// =======================
+async function refreshLocks() {
+  if (!props.isAuthed || !selectedShowtimeId.value) return;
+
+  try {
+    const res = await fetch(
+      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats/locks`,
+      { headers: authHeaders() }
+    );
+    const data = await res.json().catch(() => ({} as any));
+    if (!res.ok || !data?.ok) return;
+
+    for (const s of seats.value) {
+      if (s.status !== "BOOKED") {
+        s.status = "FREE";
+        s.owner = undefined;
+        s.ttl = undefined;
+      }
+    }
+
+    for (const l of data.locks || []) {
+      const sid = l.seat_id;
+      const s = seats.value.find((x) => x.id === sid);
+      if (s && s.status !== "BOOKED") {
+        s.status = "LOCKED";
+        s.owner = l.owner;
+        s.ttl = l.ttl_seconds;
+      }
+    }
+
+    // ถ้า seat ที่ user กำลังเลือก ถูก lock/Booked ไปแล้ว ให้เอาออกจาก picked
+    picked.value = picked.value.filter((id) => seats.value.find((s) => s.id === id)?.status === "FREE");
+  } catch {}
+}
+
+// =======================
+// ✅ WebSocket handling
+// =======================
+function applyEvent(type: string, seatIds: string[], owner?: string) {
+  for (const id of seatIds) {
+    const s = seats.value.find((x) => x.id === id);
+    if (!s) continue;
+
+    if (type === "locked") {
+      if (s.status !== "BOOKED") {
+        s.status = "LOCKED";
+        s.owner = owner;
+      }
+    } else if (type === "released" || type === "timeout") {
+      if (s.status !== "BOOKED") {
+        s.status = "FREE";
+        s.owner = undefined;
+      }
+    } else if (type === "booked") {
+      s.status = "BOOKED";
+      s.owner = undefined;
+    }
+  }
+}
+
+function connectWS() {
+  if (!token.value || !selectedShowtimeId.value) return;
+  if (ws) ws.close();
+
+  const url = `${wsBase(props.apiOrigin)}/ws/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats?token=${encodeURIComponent(token.value)}`;
+  ws = new WebSocket(url);
+
+  ws.onopen = async () => {
+    wsConnected.value = true;
+    wsLogs.value.unshift(`[ws] connected ${selectedShowtimeId.value}`);
+    await refreshLocks();
+  };
+
+  ws.onclose = () => {
+    wsConnected.value = false;
+    wsLogs.value.unshift("[ws] disconnected");
+  };
+
+  ws.onerror = () => {
+    wsLogs.value.unshift("[ws] error");
+  };
+
+  ws.onmessage = (ev) => {
+    wsLogs.value.unshift(ev.data);
+
+    try {
+      const msg = JSON.parse(ev.data);
+      const type = String(msg?.type || "");
+      const seatIds = (msg?.seat_ids || msg?.seatIds || []) as string[];
+      const owner = msg?.owner;
+
+      if (type && Array.isArray(seatIds) && seatIds.length > 0) {
+        applyEvent(type, seatIds, owner);
+
+        // ✅ ล้าง picked เฉพาะตอนอยู่หน้า pick_seats
+        if (step.value === "pick_seats" && (type === "locked" || type === "booked")) {
+          picked.value = picked.value.filter((id) => !seatIds.includes(id));
+        }
+      }
+    } catch {}
+  };
+}
+
+function disconnectWS() {
+  ws?.close();
+  ws = null;
+  wsConnected.value = false;
+}
+
+onBeforeUnmount(() => disconnectWS());
+
+// =======================
+// Step transitions
+// =======================
+function goPickSeats() {
+  error.value = null;
+  if (!props.isAuthed) {
+    error.value = "Please login first.";
+    return;
+  }
+  if (!selectedMovieId.value || !selectedShowtimeId.value) {
+    error.value = "Please select a movie and showtime.";
+    return;
+  }
+  step.value = "pick_seats";
+}
+
+watch(selectedShowtimeId, async () => {
+  seats.value = buildSeats();
+  picked.value = [];
+  lockedSeats.value = [];
+  lockRequestId.value = "";
+  paymentRef.value = "";
+  bookingId.value = "";
+  doneMessage.value = "";
+  error.value = null;
+  wsLogs.value = [];
+
+  disconnectWS();
+  if (props.isAuthed && selectedShowtimeId.value) {
+    connectWS();
+    await refreshLocks();
+  }
+});
+
+// =======================
+// API actions
+// =======================
+async function lockSeats() {
+  error.value = null;
+  if (!props.isAuthed || !selectedShowtimeId.value || picked.value.length === 0) return;
+
+  busy.value = true;
+  try {
+    const res = await fetch(
+      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats/lock`,
+      {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" } as any,
+        body: JSON.stringify({ seat_ids: picked.value }),
+      }
+    );
+
+    const data = await res.json().catch(() => ({} as any));
+
+    if (res.status === 409) {
+      await refreshLocks();
+      const conflicted = (data?.conflicted || []).join(", ");
+      throw new Error(conflicted ? `seats_unavailable: ${conflicted}` : "seats_unavailable");
+    }
+
+    if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP_${res.status}`);
+
+    lockRequestId.value = data.request_id;
+
+    // ✅ lock ชุดที่จะจ่าย และ generate paymentRef อัตโนมัติ
+    lockedSeats.value = [...picked.value];
+    paymentRef.value = genPaymentRef();
+
+    applyEvent("locked", lockedSeats.value, "me");
+    picked.value = [];
+
+    step.value = "pay";
+  } catch (e: any) {
+    error.value = e?.message ?? "Lock seats failed";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function releaseSeats() {
+  error.value = null;
+  if (!props.isAuthed || !selectedShowtimeId.value || lockedSeats.value.length === 0) return;
+
+  busy.value = true;
+  try {
+    const res = await fetch(
+      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats/lock`,
+      {
+        method: "DELETE",
+        headers: { ...authHeaders(), "Content-Type": "application/json" } as any,
+        body: JSON.stringify({ seat_ids: lockedSeats.value }),
+      }
+    );
+
+    const data = await res.json().catch(() => ({} as any));
+    if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP_${res.status}`);
+
+    applyEvent("released", lockedSeats.value);
+
+    lockedSeats.value = [];
+    lockRequestId.value = "";
+    paymentRef.value = "";
+
+    step.value = "pick_seats";
+    await refreshLocks();
+  } catch (e: any) {
+    error.value = e?.message ?? "Release failed";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function confirmBooking() {
+  error.value = null;
+  if (!props.isAuthed || !selectedShowtimeId.value || lockedSeats.value.length === 0) return;
+
+  // ✅ กันเคส paymentRef ว่าง (ถึงแม้ตอน lock จะ gen ให้แล้ว)
+  if (!paymentRef.value) paymentRef.value = genPaymentRef();
+
+  if (!lockRequestId.value) {
+    error.value = "Missing request_id. Please lock again.";
+    return;
+  }
+
+  busy.value = true;
+  try {
+    const res = await fetch(
+      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/bookings/confirm`,
+      {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" } as any,
+        body: JSON.stringify({
+          seat_ids: lockedSeats.value,
+          payment_ref: paymentRef.value,
+          request_id: lockRequestId.value,
+        }),
+      }
+    );
+
+    const data = await res.json().catch(() => ({} as any));
+    if (!res.ok || !data?.ok) {
+      await refreshLocks();
+      throw new Error(data?.error || `HTTP_${res.status}`);
+    }
+
+    bookingId.value = data.booking_id || data.id || "";
+    doneMessage.value = "Booking completed successfully.";
+
+    applyEvent("booked", lockedSeats.value);
+
+    step.value = "done";
+  } catch (e: any) {
+    error.value = e?.message ?? "Confirm booking failed";
+  } finally {
+    busy.value = false;
+  }
+}
+</script>
+
+<template>
+  <div class="space-y-5">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-2 text-xs">
+        <span class="pill" :class="step==='pick_movie' ? 'text-white border border-white/20' : 'text-slate-300 border border-white/10'">1) Movie</span>
+        <span class="text-slate-500">→</span>
+        <span class="pill" :class="step==='pick_seats' ? 'text-white border border-white/20' : 'text-slate-300 border border-white/10'">2) Seats</span>
+        <span class="text-slate-500">→</span>
+        <span class="pill" :class="step==='pay' ? 'text-white border border-white/20' : 'text-slate-300 border border-white/10'">3) Pay</span>
+        <span class="text-slate-500">→</span>
+        <span class="pill" :class="step==='done' ? 'text-white border border-white/20' : 'text-slate-300 border border-white/10'">4) Done</span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <span class="pill" :class="wsConnected ? 'text-emerald-200 border border-emerald-400/20' : 'text-slate-300 border border-white/10'">
+          {{ wsConnected ? "Live events: ON" : "Live events: OFF" }}
+        </span>
+        <button class="btn btn-secondary" @click="refreshLocks" :disabled="busy || !selectedShowtimeId">Refresh</button>
+        <button class="btn btn-secondary" @click="resetFlow" :disabled="busy">Reset</button>
+      </div>
+    </div>
+
+    <div v-if="error" class="alert alert-error">{{ error }}</div>
+
+    <!-- Step 1 -->
+    <div v-if="step === 'pick_movie'" class="space-y-4">
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <button
+          v-for="m in movies"
+          :key="m.id"
+          class="card-muted text-left hover:bg-white/10 transition"
+          :class="selectedMovieId === m.id ? 'ring-2 ring-white/20' : 'ring-1 ring-white/5'"
+          @click="selectedMovieId = m.id"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-white font-semibold">{{ m.title }}</p>
+              <p class="text-xs text-slate-400 mt-1">{{ m.duration }} • {{ m.rating }}</p>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <span v-for="t in (m.tags || [])" :key="t" class="pill text-slate-200 border border-white/10">{{ t }}</span>
+              </div>
+            </div>
+            <span class="pill text-slate-200 border border-white/10">{{ m.showtimes.length }} showtimes</span>
+          </div>
+        </button>
+      </div>
+
+      <div class="card-muted space-y-3">
+        <p class="text-sm font-semibold text-white">Showtime</p>
+        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            v-for="s in showtimes"
+            :key="s.id"
+            class="btn"
+            :class="selectedShowtimeId === s.id ? 'btn-primary' : 'btn-ghost'"
+            @click="selectedShowtimeId = s.id"
+          >
+            {{ s.label }} <span class="ml-2 text-xs opacity-70">({{ s.id }})</span>
+          </button>
+          <div v-if="!selectedMovie" class="text-sm text-slate-400">Select a movie first.</div>
+        </div>
+
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-xs text-slate-400">
+            Login required: <span class="font-mono">{{ props.isAuthed ? "YES" : "NO" }}</span>
+          </div>
+          <button class="btn btn-primary" @click="goPickSeats" :disabled="!props.isAuthed || !selectedShowtimeId">
+            Continue to seat selection
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Seat grid for seats/pay/done -->
+    <div v-else class="space-y-4">
+      <div class="card-muted">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p class="text-sm font-semibold text-white">
+              {{ step === "pick_seats" ? "Choose seats" : step === "pay" ? "Review seats & pay" : "Booking summary" }}
+            </p>
+            <p class="text-xs text-slate-400">
+              Showtime: <span class="font-mono text-slate-200">{{ selectedShowtimeId }}</span>
+            </p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <span class="pill text-slate-200 border border-white/10">Picked: {{ picked.length }}</span>
+            <span class="pill text-slate-200 border border-white/10">Locked: {{ lockedSeats.length }}</span>
+            <button class="btn btn-secondary" @click="picked = []" :disabled="busy || picked.length === 0 || step !== 'pick_seats'">
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <div class="mb-3 flex items-center justify-between text-xs text-slate-400">
+            <span>Screen</span>
+            <div class="flex items-center gap-2">
+              <span class="pill border border-white/10 text-slate-300">FREE</span>
+              <span class="pill border border-emerald-400/20 text-emerald-200 bg-emerald-500/10">PICKED</span>
+              <span class="pill border border-amber-400/20 text-amber-200 bg-amber-500/10">LOCKED</span>
+              <span class="pill border border-emerald-400/25 text-emerald-200 bg-emerald-500/10">LOCKED (ME)</span>
+              <span class="pill border border-rose-400/20 text-rose-200 bg-rose-500/10">BOOKED</span>
+            </div>
+          </div>
+
+          <div class="h-2 rounded-full bg-white/10 mb-4" />
+
+          <div class="space-y-2">
+            <div v-for="r in seatRows" :key="r" class="flex items-center gap-2">
+              <div class="w-6 text-xs text-slate-400">{{ r }}</div>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  v-for="n in seatCols"
+                  :key="`${r}${n}`"
+                  type="button"
+                  :class="seatClass(seats.find(x => x.id === `${r}${n}`)!)"
+                  @click="toggleSeat(`${r}${n}`)"
+                  :disabled="busy || step !== 'pick_seats'"
+                >
+                  {{ r }}{{ n }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="text-xs text-slate-400">
+            If you get 409 seats_unavailable: someone locked/booked it first. Click Refresh and pick another seat.
+          </div>
+
+          <div class="flex gap-2">
+            <button class="btn btn-ghost" @click="step = 'pick_movie'" :disabled="busy">Back</button>
+
+            <button v-if="step==='pick_seats'" class="btn btn-primary" @click="lockSeats" :disabled="busy || picked.length===0">
+              Lock & Continue
+            </button>
+
+            <template v-else-if="step==='pay'">
+              <button class="btn btn-danger" @click="releaseSeats" :disabled="busy || lockedSeats.length===0">Cancel & Release</button>
+              <button class="btn btn-primary" @click="confirmBooking" :disabled="busy || lockedSeats.length===0">
+                Pay & Confirm
+              </button>
+            </template>
+
+            <button v-else class="btn btn-primary" @click="resetFlow" :disabled="busy">Book another</button>
+          </div>
+        </div>
+
+        <div v-if="step==='pay'" class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Seats</p>
+            <p class="text-white font-semibold mt-1">{{ lockedSeats.join(", ") }}</p>
+          </div>
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Amount (mock)</p>
+            <p class="text-white font-semibold mt-1">{{ lockedSeats.length * 200 }} THB</p>
+          </div>
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Payment ref (auto)</p>
+            <p class="text-white font-semibold mt-1 font-mono break-words">{{ paymentRef || "-" }}</p>
+          </div>
+        </div>
+
+        <div v-if="step==='done'" class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Status</p>
+            <p class="text-white font-semibold mt-1">COMPLETED</p>
+            <p class="text-xs text-slate-400 mt-1">{{ doneMessage }}</p>
+          </div>
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Booking ID</p>
+            <p class="text-white font-semibold mt-1 font-mono break-words">{{ bookingId || "-" }}</p>
+          </div>
+          <div class="card-muted">
+            <p class="text-xs uppercase text-slate-400">Payment ref</p>
+            <p class="text-white font-semibold mt-1 font-mono break-words">{{ paymentRef || "-" }}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live events -->
+      <div class="card-muted">
+        <p class="text-sm font-semibold text-white mb-2">Live seat events</p>
+        <div class="rounded-2xl bg-slate-900/70 ring-1 ring-white/5 h-44 overflow-auto text-xs font-mono text-slate-100">
+          <div v-if="wsLogs.length === 0" class="p-4 text-slate-400">No events yet.</div>
+          <div v-else>
+            <div v-for="(l, idx) in wsLogs" :key="idx" class="border-b border-white/5 px-4 py-2">
+              {{ l }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

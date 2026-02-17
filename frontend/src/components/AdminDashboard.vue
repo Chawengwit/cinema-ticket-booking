@@ -10,29 +10,15 @@ type AuditItem = any;
 const tab = ref<"bookings" | "audit">("bookings");
 
 // ---------------- helpers ----------------
-function authHeaders() {
+function authHeaders(): HeadersInit {
   const token = localStorage.getItem(AUTH_KEY);
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function toISOStart(dateStr: string) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr + "T00:00:00");
-  return d.toISOString();
-}
-
-function toISOEnd(dateStr: string) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr + "T23:59:59.999");
-  return d.toISOString();
-}
+// ---------------- common filter (movie/showtime only) ----------------
+const movieFilter = ref(""); // use showtime_id as "movie/showtime filter"
 
 // ---------------- bookings ----------------
-const b_showtime = ref("");
-const b_status = ref("");
-const b_user = ref("");
-const b_from = ref("");
-const b_to = ref("");
 const b_limit = ref(20);
 const b_skip = ref(0);
 
@@ -51,19 +37,15 @@ async function loadBookings() {
 
   try {
     const qs = new URLSearchParams();
-    if (b_showtime.value) qs.set("showtime_id", b_showtime.value);
-    if (b_status.value) qs.set("status", b_status.value);
-    if (b_user.value) qs.set("user_id", b_user.value);
-    if (b_from.value) qs.set("from", toISOStart(b_from.value));
-    if (b_to.value) qs.set("to", toISOEnd(b_to.value));
+    if (movieFilter.value) qs.set("showtime_id", movieFilter.value); // <-- filter movie/showtime
     qs.set("limit", String(b_limit.value));
     qs.set("skip", String(b_skip.value));
 
     const res = await fetch(`${API_ORIGIN}/api/admin/bookings?${qs.toString()}`, {
-      headers: { ...authHeaders() },
+      headers: authHeaders(),
     });
 
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json().catch(() => ({} as any));
     if (!res.ok || !data?.ok) {
       throw new Error(data?.error || `HTTP_${res.status}`);
     }
@@ -83,12 +65,6 @@ function bookingsApplyFilters() {
 }
 
 // ---------------- audit ----------------
-const a_type = ref("");
-const a_showtime = ref("");
-const a_user = ref("");
-const a_booking = ref("");
-const a_from = ref("");
-const a_to = ref("");
 const a_limit = ref(20);
 const a_skip = ref(0);
 
@@ -107,20 +83,15 @@ async function loadAudit() {
 
   try {
     const qs = new URLSearchParams();
-    if (a_type.value) qs.set("type", a_type.value);
-    if (a_showtime.value) qs.set("showtime_id", a_showtime.value);
-    if (a_user.value) qs.set("user_id", a_user.value);
-    if (a_booking.value) qs.set("booking_id", a_booking.value);
-    if (a_from.value) qs.set("from", toISOStart(a_from.value));
-    if (a_to.value) qs.set("to", toISOEnd(a_to.value));
+    if (movieFilter.value) qs.set("showtime_id", movieFilter.value); // <-- filter movie/showtime
     qs.set("limit", String(a_limit.value));
     qs.set("skip", String(a_skip.value));
 
     const res = await fetch(`${API_ORIGIN}/api/admin/audit?${qs.toString()}`, {
-      headers: { ...authHeaders() },
+      headers: authHeaders(),
     });
 
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json().catch(() => ({} as any));
     if (!res.ok || !data?.ok) {
       throw new Error(data?.error || `HTTP_${res.status}`);
     }
@@ -154,99 +125,93 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="rounded-2xl bg-white p-6 shadow space-y-4">
-    <div class="flex items-center justify-between gap-3">
+  <div class="card space-y-5">
+    <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="text-xl font-bold">Admin Dashboard</h2>
-        <p class="text-sm text-gray-600">Bookings + Audit Logs (filters + pagination)</p>
+        <p class="section-title">Admin Dashboard</p>
+        <p class="section-subtitle">Bookings &amp; Audit logs (filter by movie/showtime only)</p>
       </div>
-
       <div class="flex gap-2">
-        <button
-          class="rounded-xl px-4 py-2 text-sm font-semibold"
-          :class="tab === 'bookings' ? 'bg-black text-white' : 'bg-gray-100 text-gray-900'"
-          @click="tab = 'bookings'; loadBookings()"
-        >
+        <button class="btn" :class="tab === 'bookings' ? 'btn-primary' : 'btn-ghost'" @click="tab = 'bookings'; loadBookings()">
           Bookings
         </button>
-        <button
-          class="rounded-xl px-4 py-2 text-sm font-semibold"
-          :class="tab === 'audit' ? 'bg-black text-white' : 'bg-gray-100 text-gray-900'"
-          @click="tab = 'audit'; loadAudit()"
-        >
-          Audit
+        <button class="btn" :class="tab === 'audit' ? 'btn-primary' : 'btn-ghost'" @click="tab = 'audit'; loadAudit()">
+          Audit Logs
         </button>
+      </div>
+    </div>
+
+    <!-- Filter -->
+    <div class="card-muted">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div class="w-full sm:max-w-md">
+          <label class="text-xs uppercase text-slate-400">Movie / Showtime</label>
+          <input v-model="movieFilter" class="input mt-2" placeholder="Showtime ID (e.g., SHOW1)" />
+        </div>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary" @click="movieFilter = '' ; (tab==='bookings' ? bookingsApplyFilters() : auditApplyFilters())">
+            Clear
+          </button>
+          <button class="btn btn-primary" @click="tab==='bookings' ? bookingsApplyFilters() : auditApplyFilters()">
+            Apply
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- BOOKINGS TAB -->
     <div v-if="tab === 'bookings'" class="space-y-4">
-      <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
-        <input v-model="b_showtime" class="rounded-xl border p-2 text-sm" placeholder="showtime_id" />
-        <input v-model="b_status" class="rounded-xl border p-2 text-sm" placeholder="status (BOOKED...)" />
-        <input v-model="b_user" class="rounded-xl border p-2 text-sm" placeholder="user_id" />
-
-        <input v-model="b_from" type="date" class="rounded-xl border p-2 text-sm" />
-        <input v-model="b_to" type="date" class="rounded-xl border p-2 text-sm" />
-
-        <button
-          class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white"
-          @click="bookingsApplyFilters"
-        >
-          Apply
-        </button>
-      </div>
-
-      <div class="flex items-center justify-between text-sm text-gray-600">
-        <div>Total: <span class="font-semibold">{{ bookingsTotal }}</span></div>
+      <div class="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-300">
+        <div class="pill">Total {{ bookingsTotal }}</div>
         <div class="flex items-center gap-2">
-          <button
-            class="rounded-lg border px-3 py-1 disabled:opacity-40"
-            :disabled="!bookingsHasPrev"
-            @click="b_skip -= b_limit; loadBookings()"
-          >
+          <button class="btn btn-secondary" :disabled="!bookingsHasPrev" @click="b_skip -= b_limit; loadBookings()">
             Prev
           </button>
-          <span>Page {{ bookingsPage }}</span>
-          <button
-            class="rounded-lg border px-3 py-1 disabled:opacity-40"
-            :disabled="!bookingsHasNext"
-            @click="b_skip += b_limit; loadBookings()"
-          >
+          <span class="text-xs text-slate-400">Page {{ bookingsPage }}</span>
+          <button class="btn btn-secondary" :disabled="!bookingsHasNext" @click="b_skip += b_limit; loadBookings()">
             Next
           </button>
         </div>
       </div>
 
-      <div v-if="bookingsError" class="rounded-xl bg-red-50 p-3 text-sm text-red-700">
-        {{ bookingsError }}
-      </div>
-      <div v-if="bookingsLoading" class="text-sm text-gray-600">Loading...</div>
-
-      <div v-else class="overflow-auto rounded-xl border">
-        <table class="w-full text-left text-sm">
-          <thead class="bg-gray-50">
+      <div v-if="bookingsError" class="alert alert-error">{{ bookingsError }}</div>
+      <div v-else-if="bookingsLoading" class="alert alert-info">Loading bookings...</div>
+      <div v-else class="table-shell">
+        <table class="table">
+          <thead>
             <tr>
-              <th class="p-3">ID</th>
-              <th class="p-3">Showtime</th>
-              <th class="p-3">User</th>
-              <th class="p-3">Status</th>
-              <th class="p-3">Seats</th>
-              <th class="p-3">Created</th>
+              <th>ID</th>
+              <th>Showtime</th>
+              <th>User</th>
+              <th>Status</th>
+              <th>Seats</th>
+              <th>Created</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="it in bookings" :key="it._id || it.id" class="border-t">
-              <td class="p-3 font-mono text-xs">{{ it._id || it.id }}</td>
-              <td class="p-3">{{ it.showtime_id || it.showtimeId }}</td>
-              <td class="p-3 font-mono text-xs">{{ it.user_id || it.userId }}</td>
-              <td class="p-3 font-semibold">{{ it.status }}</td>
-              <td class="p-3">{{ fmtSeats(it) }}</td>
-              <td class="p-3 text-xs text-gray-600">{{ fmtTime(it) }}</td>
+            <tr v-for="it in bookings" :key="it._id || it.id">
+              <td class="font-mono text-xs">{{ it._id || it.id }}</td>
+              <td class="font-mono text-xs">{{ it.showtime_id || it.showtimeId }}</td>
+              <td class="font-mono text-xs">{{ it.user_id || it.userId }}</td>
+              <td>
+                <span
+                  class="badge"
+                  :class="
+                    (it.status || '').toUpperCase() === 'BOOKED'
+                      ? 'badge-success'
+                      : (it.status || '').toUpperCase() === 'PENDING'
+                      ? 'badge-warning'
+                      : 'badge-primary'
+                  "
+                >
+                  {{ it.status || "-" }}
+                </span>
+              </td>
+              <td>{{ fmtSeats(it) }}</td>
+              <td class="text-xs text-slate-400">{{ fmtTime(it) }}</td>
             </tr>
-
             <tr v-if="bookings.length === 0">
-              <td class="p-4 text-gray-500" colspan="6">No results</td>
+              <td colspan="6" class="px-4 py-6 text-center text-slate-400">No bookings found</td>
             </tr>
           </tbody>
         </table>
@@ -255,84 +220,55 @@ onMounted(() => {
 
     <!-- AUDIT TAB -->
     <div v-else class="space-y-4">
-      <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
-        <input v-model="a_type" class="rounded-xl border p-2 text-sm" placeholder="type (seat.lock...)" />
-        <input v-model="a_showtime" class="rounded-xl border p-2 text-sm" placeholder="showtime_id" />
-        <input v-model="a_user" class="rounded-xl border p-2 text-sm" placeholder="user_id" />
-        <input v-model="a_booking" class="rounded-xl border p-2 text-sm" placeholder="booking_id" />
-        <input v-model="a_from" type="date" class="rounded-xl border p-2 text-sm" />
-        <input v-model="a_to" type="date" class="rounded-xl border p-2 text-sm" />
-
-        <button
-          class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white md:col-span-6"
-          @click="auditApplyFilters"
-        >
-          Apply
-        </button>
-      </div>
-
-      <div class="flex items-center justify-between text-sm text-gray-600">
-        <div>Total: <span class="font-semibold">{{ auditTotal }}</span></div>
+      <div class="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-300">
+        <div class="pill">Total {{ auditTotal }}</div>
         <div class="flex items-center gap-2">
-          <button
-            class="rounded-lg border px-3 py-1 disabled:opacity-40"
-            :disabled="!auditHasPrev"
-            @click="a_skip -= a_limit; loadAudit()"
-          >
+          <button class="btn btn-secondary" :disabled="!auditHasPrev" @click="a_skip -= a_limit; loadAudit()">
             Prev
           </button>
-          <span>Page {{ auditPage }}</span>
-          <button
-            class="rounded-lg border px-3 py-1 disabled:opacity-40"
-            :disabled="!auditHasNext"
-            @click="a_skip += a_limit; loadAudit()"
-          >
+          <span class="text-xs text-slate-400">Page {{ auditPage }}</span>
+          <button class="btn btn-secondary" :disabled="!auditHasNext" @click="a_skip += a_limit; loadAudit()">
             Next
           </button>
         </div>
       </div>
 
-      <div v-if="auditError" class="rounded-xl bg-red-50 p-3 text-sm text-red-700">
-        {{ auditError }}
-      </div>
-      <div v-if="auditLoading" class="text-sm text-gray-600">Loading...</div>
-
-      <div v-else class="overflow-auto rounded-xl border">
-        <table class="w-full text-left text-sm">
-          <thead class="bg-gray-50">
+      <div v-if="auditError" class="alert alert-error">{{ auditError }}</div>
+      <div v-else-if="auditLoading" class="alert alert-info">Loading audit logs...</div>
+      <div v-else class="table-shell">
+        <table class="table">
+          <thead>
             <tr>
-              <th class="p-3">Time</th>
-              <th class="p-3">Type</th>
-              <th class="p-3">Showtime</th>
-              <th class="p-3">User</th>
-              <th class="p-3">Booking</th>
-              <th class="p-3">Payload</th>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Showtime</th>
+              <th>User</th>
+              <th>Booking</th>
+              <th>Payload</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="it in audit" :key="it._id || it.id" class="border-t align-top">
-              <td class="p-3 text-xs text-gray-600">{{ fmtTime(it) }}</td>
-              <td class="p-3 font-semibold">{{ it.type }}</td>
-              <td class="p-3">{{ it.showtime_id || it.showtimeId || "-" }}</td>
-              <td class="p-3 font-mono text-xs">{{ it.user_id || it.userId || "-" }}</td>
-              <td class="p-3 font-mono text-xs">{{ it.booking_id || it.bookingId || "-" }}</td>
-              <td class="p-3">
-                <pre class="max-w-[560px] whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-2 text-xs">{{
-                  typeof it.payload === "string" ? it.payload : JSON.stringify(it.payload ?? it, null, 2)
-                }}</pre>
+            <tr v-for="it in audit" :key="it._id || it.id">
+              <td class="text-xs text-slate-400">{{ fmtTime(it) }}</td>
+              <td class="font-semibold">{{ it.type }}</td>
+              <td class="font-mono text-xs">{{ it.showtime_id || it.showtimeId || "-" }}</td>
+              <td class="font-mono text-xs">{{ it.user_id || it.userId || "-" }}</td>
+              <td class="font-mono text-xs">{{ it.booking_id || it.bookingId || "-" }}</td>
+              <td>
+                <pre class="max-w-[560px] whitespace-pre-wrap break-words rounded-xl bg-slate-900/70 p-3 text-xs ring-1 ring-white/5"
+                >{{ typeof it.payload === "string" ? it.payload : JSON.stringify(it.payload ?? it, null, 2) }}</pre>
               </td>
             </tr>
-
             <tr v-if="audit.length === 0">
-              <td class="p-4 text-gray-500" colspan="6">No results</td>
+              <td colspan="6" class="px-4 py-6 text-center text-slate-400">No audit logs found</td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <div class="text-xs text-gray-500">
-      Tip: ถ้าเจอ 403 แปลว่า user ไม่ใช่ ADMIN หรือยังไม่ได้ตั้งค่า ADMIN_EMAILS ใน backend
+    <div class="text-xs text-slate-400">
+      Tip: 403 responses mean the account is not in <span class="font-mono">ADMIN_EMAILS</span> or the JWT is missing/expired.
     </div>
   </div>
 </template>
