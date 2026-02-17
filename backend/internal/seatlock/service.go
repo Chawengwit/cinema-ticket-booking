@@ -34,7 +34,36 @@ type LockInfo struct {
 	TTLSeconds int64  `json:"ttl_seconds"`
 }
 
-// Atomic multi-seat lock (all-or-nothing)
+// =====================
+// Seat events (PubSub)
+// =====================
+
+type SeatEvent struct {
+	Type       string   `json:"type"` // "locked" | "released" | "booked" | "timeout"
+	ShowtimeID string   `json:"showtime_id"`
+	SeatIDs    []string `json:"seat_ids"`
+	Owner      string   `json:"owner"`
+	RequestID  string   `json:"request_id,omitempty"`
+	BookingID  string   `json:"booking_id,omitempty"`
+	At         int64    `json:"at"` // unix seconds
+}
+
+func channel(showtimeID string) string {
+	return fmt.Sprintf("seat-events:%s", showtimeID)
+}
+
+func (s *Service) publish(ctx context.Context, ev SeatEvent) {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	_ = s.rdb.Publish(ctx, channel(ev.ShowtimeID), b).Err()
+}
+
+// =====================
+// Atomic lock all seats
+// =====================
+
 // value stored as: owner:requestId
 // - allow lock if key empty OR already owned by same owner (prefix match)
 var luaLockAll = redis.NewScript(`
@@ -85,7 +114,6 @@ func (s *Service) LockSeats(ctx context.Context, showtimeID string, seatIDs []st
 		return false, "", err
 	}
 
-	// res = {1,""} or {0,"seatlock:show:seat"}
 	arr, ok := res.([]any)
 	if !ok || len(arr) < 2 {
 		return false, "", fmt.Errorf("unexpected lua result: %T", res)
@@ -93,6 +121,19 @@ func (s *Service) LockSeats(ctx context.Context, showtimeID string, seatIDs []st
 
 	okInt, _ := arr[0].(int64)
 	if okInt == 1 {
+		// track expiry for timeout sweeper
+		expireMs := time.Now().Add(s.ttl).UnixMilli()
+		zk := expZKey(showtimeID)
+
+		pipe := s.rdb.Pipeline()
+		for _, sid := range seatIDs {
+			pipe.ZAdd(ctx, zk, redis.Z{
+				Score:  float64(expireMs),
+				Member: expMember(sid, owner, requestID),
+			})
+		}
+		_, _ = pipe.Exec(ctx)
+
 		s.publish(ctx, SeatEvent{
 			Type:       "locked",
 			ShowtimeID: showtimeID,
@@ -112,7 +153,10 @@ func (s *Service) LockSeats(ctx context.Context, showtimeID string, seatIDs []st
 	return false, confKey, nil
 }
 
-// Release only seats owned by owner (safe)
+// =====================
+// Release seats owned by owner
+// =====================
+
 // matches prefix: owner:
 var luaReleaseOwned = redis.NewScript(`
 local owner = ARGV[1]
@@ -127,6 +171,26 @@ for i=1,#KEYS do
     redis.call("DEL", KEYS[i])
   end
 end
+return 1
+`)
+
+// remove ZSET members that start with "seat|owner|"
+var luaZRemBySeatOwner = redis.NewScript(`
+local zkey = KEYS[1]
+local owner = ARGV[1]
+
+local members = redis.call("ZRANGE", zkey, 0, -1)
+
+for i=2,#KEYS do
+  local seatId = KEYS[i]
+  local prefix = seatId .. "|" .. owner .. "|"
+  for _,m in ipairs(members) do
+    if string.sub(m, 1, string.len(prefix)) == prefix then
+      redis.call("ZREM", zkey, m)
+    end
+  end
+end
+
 return 1
 `)
 
@@ -148,6 +212,15 @@ func (s *Service) ReleaseSeats(ctx context.Context, showtimeID string, seatIDs [
 		return err
 	}
 
+	// cleanup expiry tracking (any rid of this owner)
+	zk := expZKey(showtimeID)
+	remKeys := make([]string, 0, len(seatIDs)+1)
+	remKeys = append(remKeys, zk)
+	for _, sid := range seatIDs {
+		remKeys = append(remKeys, sid)
+	}
+	_, _ = luaZRemBySeatOwner.Run(ctx, s.rdb, remKeys, owner).Result()
+
 	s.publish(ctx, SeatEvent{
 		Type:       "released",
 		ShowtimeID: showtimeID,
@@ -158,11 +231,10 @@ func (s *Service) ReleaseSeats(ctx context.Context, showtimeID string, seatIDs [
 	return nil
 }
 
-// Confirm booking atomically:
-// - If any seat is already booked => already_booked
-// - Else require all locks exist AND owned by owner:requestId
-// - Then SET bookedKey = bookingId and DEL lock keys
-//
+// =====================
+// Confirm booking atomically
+// =====================
+
 // KEYS layout: [1..n] lock keys, [n+1..2n] booked keys
 var luaConfirmBooked = redis.NewScript(`
 local owner = ARGV[1]
@@ -172,7 +244,7 @@ local n = tonumber(ARGV[4])
 
 local expected = owner .. ":" .. rid
 
--- ✅ First: if any seat already booked, return already_booked
+-- First: if any seat already booked
 for i=1,n do
   local bookedK = KEYS[n+i]
   if redis.call("EXISTS", bookedK) == 1 then
@@ -237,7 +309,17 @@ func (s *Service) ConfirmSeatsBooked(
 	}
 
 	okInt, _ := arr[0].(int64)
+
+	zk := expZKey(showtimeID)
+
+	// ✅ SUCCESS: cleanup expiry tracking + publish
 	if okInt == 1 {
+		pipe := s.rdb.Pipeline()
+		for _, sid := range seatIDs {
+			pipe.ZRem(ctx, zk, expMember(sid, owner, requestID))
+		}
+		_, _ = pipe.Exec(ctx)
+
 		s.publish(ctx, SeatEvent{
 			Type:       "booked",
 			ShowtimeID: showtimeID,
@@ -247,13 +329,27 @@ func (s *Service) ConfirmSeatsBooked(
 			BookingID:  bookingID,
 			At:         time.Now().Unix(),
 		})
+
 		return true, "", "", nil
 	}
 
+	// failure
 	confKey, _ := arr[1].(string)
 	reason, _ = arr[2].(string)
 
-	// extract seat id from key
+	// ✅ IMPORTANT:
+	// - If already_booked -> remove zset member to avoid sweeper firing timeout later (stale)
+	// - If missing_lock -> do NOT remove (let sweeper produce timeout event)
+	// - If not_owner -> do NOT remove (owner mismatch)
+	if reason == "already_booked" {
+		pipe := s.rdb.Pipeline()
+		for _, sid := range seatIDs {
+			pipe.ZRem(ctx, zk, expMember(sid, owner, requestID))
+		}
+		_, _ = pipe.Exec(ctx)
+	}
+
+	// extract seat id from key (seatlock/show/seat or seatbooked/show/seat)
 	if strings.HasPrefix(confKey, "seatlock:") || strings.HasPrefix(confKey, "seatbooked:") {
 		parts := strings.Split(confKey, ":")
 		if len(parts) >= 3 {
@@ -264,7 +360,10 @@ func (s *Service) ConfirmSeatsBooked(
 	return false, confKey, reason, nil
 }
 
+// =====================
 // Debug/dev: list current locks for showtime + ttl remaining
+// =====================
+
 func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo, error) {
 	pattern := fmt.Sprintf("seatlock:%s:*", showtimeID)
 
@@ -330,27 +429,4 @@ func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo,
 	}
 
 	return out, nil
-}
-
-type SeatEvent struct {
-	Type       string   `json:"type"` // "locked" | "released" | "booked"
-	ShowtimeID string   `json:"showtime_id"`
-	SeatIDs    []string `json:"seat_ids"`
-	Owner      string   `json:"owner"`
-	RequestID  string   `json:"request_id,omitempty"`
-	BookingID  string   `json:"booking_id,omitempty"`
-	At         int64    `json:"at"` // unix seconds
-}
-
-func channel(showtimeID string) string {
-	return fmt.Sprintf("seat-events:%s", showtimeID)
-}
-
-func (s *Service) publish(ctx context.Context, ev SeatEvent) {
-	b, err := json.Marshal(ev)
-	if err != nil {
-		return
-	}
-	// best-effort publish (ไม่ทำให้ API fail ถ้า pubsub มีปัญหา)
-	_ = s.rdb.Publish(ctx, channel(ev.ShowtimeID), b).Err()
 }

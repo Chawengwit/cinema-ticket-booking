@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cinema/internal/audit"
 	"cinema/internal/auth"
 	"cinema/internal/cache"
 	"cinema/internal/config"
@@ -27,6 +28,7 @@ func main() {
 
 	// connect mongo + redis
 	rootCtx := context.Background()
+
 	mongoConn, err := db.ConnectMongo(rootCtx, cfg.MongoURI)
 	if err != nil {
 		panic(err)
@@ -42,6 +44,15 @@ func main() {
 	// services
 	jwtSvc := auth.NewJWTService(cfg.JWTSecret)
 	userRepo := repo.NewUserRepo(mongoConn.DB)
+
+	// repos
+	auditRepo := repo.NewAuditRepo(mongoConn.DB)
+
+	// background: audit worker
+	go audit.Run(rootCtx, redisClient, auditRepo)
+
+	// background: timeout sweeper
+	go seatlock.StartTimeoutSweeper(rootCtx, redisClient)
 
 	// WebSocket
 	seatWS := handler.NewSeatWSHandler(redisClient, jwtSvc)
@@ -123,10 +134,7 @@ func main() {
 			middleware.AuthRequired(jwtSvc),
 			middleware.RequireRole(model.RoleAdmin),
 			func(c *gin.Context) {
-				c.JSON(200, gin.H{
-					"ok":    true,
-					"admin": true,
-				})
+				c.JSON(200, gin.H{"ok": true, "admin": true})
 			},
 		)
 
@@ -138,7 +146,6 @@ func main() {
 
 		// Booking
 		st.POST("/bookings/confirm", bookingHandler.Confirm)
-
 	}
 
 	// WebSocket
