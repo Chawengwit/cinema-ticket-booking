@@ -9,6 +9,7 @@ import (
 	"cinema/internal/http/middleware"
 	"cinema/internal/model"
 	"cinema/internal/repo"
+	"cinema/internal/seatlock"
 	"context"
 	"net/http"
 	"time"
@@ -41,6 +42,11 @@ func main() {
 	// services
 	jwtSvc := auth.NewJWTService(cfg.JWTSecret)
 	userRepo := repo.NewUserRepo(mongoConn.DB)
+
+	// SeatLock service
+	seatTTL := time.Duration(cfg.SeatLockTTLSeconds) * time.Second
+	seatLockSvc := seatlock.New(redisClient, seatTTL)
+	seatLockHandler := handler.NewSeatLockHandler(seatLockSvc, cfg.SeatLockTTLSeconds)
 
 	// router
 	r := gin.Default()
@@ -80,7 +86,7 @@ func main() {
 		authGroup.GET("/login", ga.Login)
 		authGroup.GET("/callback", ga.Callback)
 
-		// return user profile (not only user_id/role)
+		// return user profile
 		api.GET("/me", middleware.AuthRequired(jwtSvc), func(c *gin.Context) {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 			defer cancel()
@@ -116,6 +122,11 @@ func main() {
 				})
 			},
 		)
+
+		// Seat lock routes
+		st := api.Group("/showtimes/:showtimeId", middleware.AuthRequired(jwtSvc))
+		st.POST("/seats/lock", seatLockHandler.Lock)
+		st.DELETE("/seats/lock", seatLockHandler.Release)
 	}
 
 	_ = r.Run(":" + cfg.Port)

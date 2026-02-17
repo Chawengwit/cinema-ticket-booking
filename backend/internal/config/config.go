@@ -3,31 +3,40 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	AppEnv      string
-	Port        string
-	MongoURI    string
-	RedisAddr   string
-	JWTSecret   string
-	FrontendURL string
-	CORSOrigins []string // optional (เผื่ออนาคตอยาก allow หลาย origin)
+	AppEnv             string
+	Port               string
+	MongoURI           string
+	RedisAddr          string
+	JWTSecret          string
+	FrontendURL        string
+	CORSOrigins        []string
+	SeatLockTTLSeconds int
 }
 
 func Load() (Config, error) {
 	frontendURL := getenv("FRONTEND_URL", "http://localhost:5173")
 	corsOrigins := getenv("CORS_ORIGINS", frontendURL)
 
+	ttlStr := getenv("SEAT_LOCK_TTL_SECONDS", "300")
+	ttlSec, err := strconv.Atoi(ttlStr)
+	if err != nil || ttlSec <= 0 {
+		return Config{}, fmt.Errorf("invalid SEAT_LOCK_TTL_SECONDS: %s", ttlStr)
+	}
+
 	cfg := Config{
-		AppEnv:      getenv("APP_ENV", "dev"),
-		Port:        getenv("PORT", "8080"),
-		MongoURI:    getenv("MONGO_URI", ""),
-		RedisAddr:   getenv("REDIS_ADDR", ""),
-		JWTSecret:   getenv("JWT_SECRET", ""),
-		FrontendURL: frontendURL,
-		CORSOrigins: splitCSV(corsOrigins),
+		AppEnv:             getenv("APP_ENV", "dev"),
+		Port:               getenv("PORT", "8080"),
+		MongoURI:           getenv("MONGO_URI", ""),
+		RedisAddr:          getenv("REDIS_ADDR", ""),
+		JWTSecret:          getenv("JWT_SECRET", ""),
+		FrontendURL:        frontendURL,
+		CORSOrigins:        splitCSV(corsOrigins),
+		SeatLockTTLSeconds: ttlSec,
 	}
 
 	if cfg.MongoURI == "" {
