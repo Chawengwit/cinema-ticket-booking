@@ -127,6 +127,7 @@ func main() {
 		st := api.Group("/showtimes/:showtimeId", middleware.AuthRequired(jwtSvc))
 		st.POST("/seats/lock", seatLockHandler.Lock)
 		st.DELETE("/seats/lock", seatLockHandler.Release)
+		st.GET("/seats/locks", seatLockHandler.ListLocks)
 	}
 
 	_ = r.Run(":" + cfg.Port)
