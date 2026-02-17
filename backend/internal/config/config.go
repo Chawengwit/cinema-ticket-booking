@@ -16,6 +16,7 @@ type Config struct {
 	FrontendURL        string
 	CORSOrigins        []string
 	SeatLockTTLSeconds int
+	AdminEmails        []string
 }
 
 func Load() (Config, error) {
@@ -28,6 +29,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("invalid SEAT_LOCK_TTL_SECONDS: %s", ttlStr)
 	}
 
+	adminEmailsRaw := getenv("ADMIN_EMAILS", "")
+	adminEmails := normalizeEmails(splitCSV(adminEmailsRaw))
+
 	cfg := Config{
 		AppEnv:             getenv("APP_ENV", "dev"),
 		Port:               getenv("PORT", "8080"),
@@ -37,6 +41,7 @@ func Load() (Config, error) {
 		FrontendURL:        frontendURL,
 		CORSOrigins:        splitCSV(corsOrigins),
 		SeatLockTTLSeconds: ttlSec,
+		AdminEmails:        adminEmails,
 	}
 
 	if cfg.MongoURI == "" {
@@ -74,6 +79,24 @@ func splitCSV(s string) []string {
 	}
 	if len(out) == 0 {
 		return []string{}
+	}
+	return out
+}
+
+func normalizeEmails(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
 	}
 	return out
 }

@@ -26,15 +26,16 @@ func main() {
 		panic(err)
 	}
 
-	// connect mongo + redis
 	rootCtx := context.Background()
 
+	// connect mongo
 	mongoConn, err := db.ConnectMongo(rootCtx, cfg.MongoURI)
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = mongoConn.Client.Disconnect(context.Background()) }()
 
+	// connect redis
 	redisClient, err := cache.ConnectRedis(rootCtx, cfg.RedisAddr)
 	if err != nil {
 		panic(err)
@@ -43,34 +44,39 @@ func main() {
 
 	// services
 	jwtSvc := auth.NewJWTService(cfg.JWTSecret)
-	userRepo := repo.NewUserRepo(mongoConn.DB)
 
 	// repos
+	userRepo := repo.NewUserRepo(mongoConn.DB)
 	auditRepo := repo.NewAuditRepo(mongoConn.DB)
+	bookingRepo := repo.NewBookingRepo(mongoConn.DB)
 
-	// background: audit worker
+	// background workers
 	go audit.Run(rootCtx, redisClient, auditRepo)
-
-	// background: timeout sweeper
 	go seatlock.StartTimeoutSweeper(rootCtx, redisClient)
 
-	// WebSocket
+	// WebSocket handler
 	seatWS := handler.NewSeatWSHandler(redisClient, jwtSvc)
 
-	// SeatLock service
+	// SeatLock service + handler
 	seatTTL := time.Duration(cfg.SeatLockTTLSeconds) * time.Second
 	seatLockSvc := seatlock.New(redisClient, seatTTL)
 	seatLockHandler := handler.NewSeatLockHandler(seatLockSvc, cfg.SeatLockTTLSeconds)
 
-	// Booking
-	bookingRepo := repo.NewBookingRepo(mongoConn.DB)
+	// Booking handler
 	bookingHandler := handler.NewBookingHandler(seatLockSvc, bookingRepo, redisClient)
+
+	// Admin handlers
+	adminBookingHandler := handler.NewAdminBookingHandler(bookingRepo)
+	adminAuditHandler := handler.NewAdminAuditHandler(auditRepo)
+
+	// Google OAuth handler (ADMIN_EMAILS integrated via cfg.AdminEmails)
+	ga := handler.NewGoogleAuthHandler(userRepo, jwtSvc, cfg.FrontendURL, cfg.AdminEmails)
 
 	// router
 	r := gin.Default()
 	_ = r.SetTrustedProxies(nil)
 
-	// CORS middleware
+	// CORS
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORSOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -96,15 +102,15 @@ func main() {
 		})
 	})
 
-	ga := handler.NewGoogleAuthHandler(userRepo, jwtSvc, cfg.FrontendURL)
-
+	// API
 	api := r.Group("/api")
 	{
+		// Auth
 		authGroup := api.Group("/auth/google")
 		authGroup.GET("/login", ga.Login)
 		authGroup.GET("/callback", ga.Callback)
 
-		// return user profile
+		// Me
 		api.GET("/me", middleware.AuthRequired(jwtSvc), func(c *gin.Context) {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 			defer cancel()
@@ -113,11 +119,11 @@ func main() {
 
 			u, err := userRepo.FindByID(ctx, uid)
 			if err != nil {
-				c.JSON(500, gin.H{"ok": false, "error": "db_failed"})
+				c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "db_failed"})
 				return
 			}
 
-			c.JSON(200, gin.H{
+			c.JSON(http.StatusOK, gin.H{
 				"ok":   true,
 				"role": string(u.Role),
 				"user": gin.H{
@@ -130,22 +136,30 @@ func main() {
 			})
 		})
 
-		api.GET("/admin/ping",
+		// Admin (guard ด้วย role=ADMIN)
+		admin := api.Group("/admin",
 			middleware.AuthRequired(jwtSvc),
 			middleware.RequireRole(model.RoleAdmin),
-			func(c *gin.Context) {
-				c.JSON(200, gin.H{"ok": true, "admin": true})
-			},
 		)
+		{
+			admin.GET("/bookings", adminBookingHandler.List)
+			admin.GET("/audit", adminAuditHandler.List)
+			admin.GET("/ping", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"ok": true, "admin": true})
+			})
+		}
 
-		// Seat lock routes
+		// Showtime scoped routes
 		st := api.Group("/showtimes/:showtimeId", middleware.AuthRequired(jwtSvc))
-		st.POST("/seats/lock", seatLockHandler.Lock)
-		st.DELETE("/seats/lock", seatLockHandler.Release)
-		st.GET("/seats/locks", seatLockHandler.ListLocks)
+		{
+			// Seat lock
+			st.POST("/seats/lock", seatLockHandler.Lock)
+			st.DELETE("/seats/lock", seatLockHandler.Release)
+			st.GET("/seats/locks", seatLockHandler.ListLocks)
 
-		// Booking
-		st.POST("/bookings/confirm", bookingHandler.Confirm)
+			// Booking confirm
+			st.POST("/bookings/confirm", bookingHandler.Confirm)
+		}
 	}
 
 	// WebSocket

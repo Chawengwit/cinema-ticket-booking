@@ -2,11 +2,13 @@ package handler
 
 import (
 	"cinema/internal/auth"
+	"cinema/internal/model"
 	"cinema/internal/repo"
 	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,9 +21,17 @@ type GoogleAuthHandler struct {
 	userRepo    *repo.UserRepo
 	jwt         *auth.JWTService
 	frontendURL string
+
+	// NEW: admin email allowlist (lowercase)
+	adminEmails map[string]struct{}
 }
 
-func NewGoogleAuthHandler(userRepo *repo.UserRepo, jwtSvc *auth.JWTService, frontendURL string) *GoogleAuthHandler {
+func NewGoogleAuthHandler(
+	userRepo *repo.UserRepo,
+	jwtSvc *auth.JWTService,
+	frontendURL string,
+	adminEmails []string, // from cfg.AdminEmails
+) *GoogleAuthHandler {
 	cfg := &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -30,11 +40,20 @@ func NewGoogleAuthHandler(userRepo *repo.UserRepo, jwtSvc *auth.JWTService, fron
 		Endpoint:     google.Endpoint,
 	}
 
+	m := make(map[string]struct{}, len(adminEmails))
+	for _, e := range adminEmails {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" {
+			m[e] = struct{}{}
+		}
+	}
+
 	return &GoogleAuthHandler{
 		oauth:       cfg,
 		userRepo:    userRepo,
 		jwt:         jwtSvc,
 		frontendURL: frontendURL,
+		adminEmails: m,
 	}
 }
 
@@ -88,6 +107,7 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 		return
 	}
 
+	// upsert user
 	user, err := h.userRepo.UpsertGoogleUser(ctx, u.ID, u.Email, u.Name, u.Picture)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -97,6 +117,27 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 		return
 	}
 
+	// NEW: decide role by ADMIN_EMAILS
+	emailKey := strings.ToLower(strings.TrimSpace(u.Email))
+	desiredRole := model.RoleUser
+	if _, ok := h.adminEmails[emailKey]; ok {
+		desiredRole = model.RoleAdmin
+	}
+
+	// if role changed, persist it and use updated user for JWT
+	if user.Role != desiredRole {
+		updated, err := h.userRepo.SetRoleByID(ctx, user.ID, desiredRole)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"ok":    false,
+				"error": "set_role_failed",
+			})
+			return
+		}
+		user = updated
+	}
+
+	// sign jwt with latest role
 	jwtToken, err := h.jwt.Sign(user.ID.Hex(), user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

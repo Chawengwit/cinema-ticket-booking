@@ -49,6 +49,26 @@ func (r *UserRepo) UpsertGoogleUser(ctx context.Context, googleID, email, name, 
 	return &out, nil
 }
 
+// NEW: update role by Mongo _id
+func (r *UserRepo) SetRoleByID(ctx context.Context, id primitive.ObjectID, role model.UserRole) (*model.User, error) {
+	now := time.Now()
+
+	update := bson.M{
+		"$set": bson.M{
+			"role":       role,
+			"updated_at": now,
+		},
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var out model.User
+	if err := r.col.FindOneAndUpdate(ctx, bson.M{"_id": id}, update, opts).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // find user by Mongo _id (hex)
 func (r *UserRepo) FindByID(ctx context.Context, idHex string) (*model.User, error) {
 	oid, err := primitive.ObjectIDFromHex(idHex)
