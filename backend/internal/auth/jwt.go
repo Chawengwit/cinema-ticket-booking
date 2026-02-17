@@ -3,6 +3,7 @@ package auth
 import (
 	"cinema/internal/model"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -32,7 +33,8 @@ func (j *JWTService) Sign(userID string, role model.UserRole) (string, error) {
 		},
 	}
 
-	t := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	// Use HMAC (HS256) with JWT_SECRET string
+	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return t.SignedString(j.secret)
 }
 
@@ -41,6 +43,10 @@ func (j *JWTService) Verify(tokenStr string) (*Claims, error) {
 		tokenStr,
 		&Claims{},
 		func(token *jwt.Token) (any, error) {
+			// Prevent alg-confusion attacks
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
 			return j.secret, nil
 		},
 	)
@@ -54,5 +60,4 @@ func (j *JWTService) Verify(tokenStr string) (*Claims, error) {
 		return nil, errors.New("invalid token")
 	}
 	return claims, nil
-
 }

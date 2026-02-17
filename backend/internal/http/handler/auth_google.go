@@ -89,9 +89,10 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 
 	if err := json.NewDecoder(res.Body).Decode(&u); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "decode_failed"})
+		return
 	}
 
-	user, err := h.userRepo.UpsertGoogleUser(ctx, u.ID, u.Name, u.Picture)
+	user, err := h.userRepo.UpsertGoogleUser(ctx, u.ID, u.Email, u.Name, u.Picture)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"ok":    false,
@@ -104,8 +105,9 @@ func (h *GoogleAuthHandler) Callback(c *gin.Context) {
 	jwtToken, err := h.jwt.Sign(user.ID.Hex(), user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"ok":    false,
-			"error": "jwt_failed",
+			"ok":     false,
+			"error":  "jwt_failed",
+			"detail": err.Error(),
 		})
 
 		return

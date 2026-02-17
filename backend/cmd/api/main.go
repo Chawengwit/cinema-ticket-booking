@@ -1,13 +1,19 @@
 package main
 
 import (
+	"cinema/internal/auth"
 	"cinema/internal/cache"
 	"cinema/internal/config"
 	"cinema/internal/db"
+	"cinema/internal/http/handler"
+	"cinema/internal/http/middleware"
+	"cinema/internal/model"
+	"cinema/internal/repo"
 	"context"
 	"net/http"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,27 +26,34 @@ func main() {
 
 	// connect mongo + redis
 	rootCtx := context.Background()
-
 	mongoConn, err := db.ConnectMongo(rootCtx, cfg.MongoURI)
 	if err != nil {
 		panic(err)
 	}
-	defer func() {
-		_ = mongoConn.Client.Disconnect(context.Background())
-	}()
+	defer func() { _ = mongoConn.Client.Disconnect(context.Background()) }()
 
 	redisClient, err := cache.ConnectRedis(rootCtx, cfg.RedisAddr)
 	if err != nil {
 		panic(err)
 	}
+	defer func() { _ = redisClient.Close() }()
 
-	defer func() {
-		_ = redisClient.Close()
-	}()
+	// services
+	jwtSvc := auth.NewJWTService(cfg.JWTSecret)
+	userRepo := repo.NewUserRepo(mongoConn.DB)
 
 	// router
 	r := gin.Default()
 	_ = r.SetTrustedProxies(nil)
+
+	// CORS middleware
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     cfg.CORSOrigins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
 	// health
 	r.GET("/health", func(c *gin.Context) {
@@ -58,6 +71,34 @@ func main() {
 			"redis_ok": redisOK,
 		})
 	})
+
+	ga := handler.NewGoogleAuthHandler(userRepo, jwtSvc, cfg.FrontendURL)
+
+	api := r.Group("/api")
+	{
+		authGroup := api.Group("/auth/google")
+		authGroup.GET("/login", ga.Login)
+		authGroup.GET("/callback", ga.Callback)
+
+		api.GET("/me", middleware.AuthRequired(jwtSvc), func(c *gin.Context) {
+			c.JSON(200, gin.H{
+				"ok":      true,
+				"user_id": c.GetString(middleware.CtxUserID),
+				"role":    c.GetString(middleware.CtxRole),
+			})
+		})
+
+		api.GET("/admin/ping",
+			middleware.AuthRequired(jwtSvc),
+			middleware.RequireRole(model.RoleAdmin),
+			func(c *gin.Context) {
+				c.JSON(200, gin.H{
+					"ok":    true,
+					"admin": true,
+				})
+			},
+		)
+	}
 
 	_ = r.Run(":" + cfg.Port)
 }

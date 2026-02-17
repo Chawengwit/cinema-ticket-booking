@@ -15,28 +15,41 @@ const CtxRole = "role"
 func AuthRequired(jwtSvc *auth.JWTService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h := c.GetHeader("Authorization")
-		if h == "" || !strings.HasPrefix(h, "Bearer") {
+		if h == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"ok":    false,
-				"error": "invalid_token",
+				"error": "missing_authorization_header",
 			})
-
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(h, "Bearer")
-		claims, err := jwtSvc.Verify(tokenStr)
-		if err != nil {
+		// Expect: "Bearer <token>"
+		parts := strings.SplitN(h, " ", 2)
+		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" || strings.TrimSpace(parts[1]) == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"ok":    false,
-				"error": "invalid_token",
+				"error": "invalid_authorization_format",
 			})
+			return
+		}
 
+		tokenStr := strings.TrimSpace(parts[1])
+
+		claims, err := jwtSvc.Verify(tokenStr)
+		if err != nil {
+			// debug-friendly (เอา detail ออกได้ตอน production)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"ok":     false,
+				"error":  "invalid_token",
+				"detail": err.Error(),
+			})
 			return
 		}
 
 		c.Set(CtxUserID, claims.UserID)
-		c.Set(CtxRole, claims.Role)
+		// store role as string for easy JSON + GetString
+		c.Set(CtxRole, string(claims.Role))
+
 		c.Next()
 	}
 }
@@ -49,16 +62,23 @@ func RequireRole(role model.UserRole) gin.HandlerFunc {
 				"ok":    false,
 				"error": "no_role",
 			})
-
 			return
 		}
 
-		if v.(model.UserRole) != role {
+		roleStr, ok := v.(string)
+		if !ok || roleStr == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"ok":    false,
+				"error": "invalid_role_context",
+			})
+			return
+		}
+
+		if model.UserRole(roleStr) != role {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"ok":    false,
 				"error": "forbidden",
 			})
-
 			return
 		}
 
