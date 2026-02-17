@@ -6,7 +6,8 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 ### Implemented Today
 - Google OAuth login + callback persist Google profiles in Mongo, mint JWTs, and expose `/api/me` + `/api/admin/ping` so the Vue shell can show who is signed in.
 - Seat locking and booking finalization are wired end-to-end: Redis Lua scripts lock seats, `POST /api/showtimes/:id/bookings/confirm` creates Mongo bookings, and `booking-events` + `seat-events` channels broadcast outcomes.
-- A WebSocket endpoint (`/ws/showtimes/:id/seats`) streams seat lock/release/booked events via Redis Pub/Sub, and the Vue `SeatEventsCard` demonstrates connecting, locking demo seats, and inspecting the feed.
+- Background services now run alongside the API: `seatlock.StartTimeoutSweeper` watches `seatlockexp:*` zsets to emit `seat.timeout` events when holds lapse, and `internal/audit.Run` subscribes to the Redis channels to persist audit logs in Mongo.
+- A WebSocket endpoint (`/ws/showtimes/:id/seats`) streams seat lock/release/booked/timeout events via Redis Pub/Sub, and the Vue `SeatEventsCard` demonstrates connecting, locking demo seats, and inspecting the feed.
 - Docker Compose + Vite proxy still provide one-command local orchestration, and the SPA handles OAuth callbacks plus health-check surfacing for smoke tests.
 
 ### High-priority follow-ups
@@ -29,6 +30,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 ├── backend              # Go services (Gin API, Mongo, Redis clients)
 │   ├── cmd/api          # HTTP entrypoint
 │   └── internal         # Application packages
+│       ├── audit        # Redis subscribers → Mongo audit logs
 │       ├── auth         # JWT service
 │       ├── cache        # Redis connection setup
 │       ├── config       # Env configuration
@@ -51,7 +53,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 | Real-time Bus | Redis Pub/Sub | Broadcasts seat lock/unlock + booking success to API nodes |
 | Frontend | Vue 3 + Vite + Tailwind | User booking flow, admin dashboard, WebSocket client |
 | Auth | Google OAuth 2.0 + JWT | Federated login, role claims (USER / ADMIN) |
-| Messaging | Redis Pub/Sub → Notification worker (mock) | Fire-and-forget notifications + async logging |
+| Messaging | Redis Pub/Sub → Audit worker + future notification worker | Fire-and-forget notifications, audit persistence, async logging |
 | Containers | Docker + docker-compose | Single command local deployment + parity with CI |
 
 ## Current Implementation Status (Feb 17, 2026)
@@ -59,6 +61,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 - ✅ Google OAuth login/callback mints JWTs, stores users in Mongo, powers `/api/me`, and guards `/api/admin/ping` via role middleware.
 - ✅ Seat locking + release handlers run on Redis Lua scripts with TTLs, request IDs, audit-friendly payloads, and WebSocket fan-out.
 - ✅ Booking confirmation API (`POST /api/showtimes/:id/bookings/confirm`) persists PENDING → BOOKED rows in Mongo and emits `booking-events`.
+- ✅ Background timeout sweeper + audit worker run beside the API to publish `seat.timeout` events and store seat/booking activity in Mongo.
 - ✅ Vue SPA handles OAuth callback tokens, login/logout state, health checks, and includes a SeatEventsCard to demo the WebSocket feed.
 - ⏳ Still to build: real seat-map/query APIs, domain aggregates (Movie/Showtime/Seat/Booking inventory), and the pre-payment booking flow.
 - 🔜 Still pending: resilient WebSocket auth/origin controls, audit-log ingestion, admin dashboard, notification worker, and integration tests.
@@ -72,7 +75,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 | 4 | Seat lock API with 5-minute Redis TTL + double-lock guard | Endpoints to lock seats, enforce TTL, prevent duplicate holds. | ✅ Backend/API complete; still need automated tests + UX polish.
 | 5 | WebSocket broadcast for seat status changes | Real-time push (WS/SSE) wired to Redis Pub/Sub for seat map updates. | 🚧 Backend streaming + sample Vue card done; production auth/origin hardening + seat UI pending.
 | 6 | Booking confirmation (mock payment) → BOOKED + Pub/Sub event | Finalize booking, persist to Mongo, emit success event for notifications. | 🚧 API + repo exist (mock payment); needs error rollback + real payment adapter.
-| 7 | Timeout handling + seat release + audit logs | Background/job flow to release expired locks, log timeouts/errors, persist audits. | ⏳ Planned.
+| 7 | Timeout handling + seat release + audit logs | Background/job flow to release expired locks, log timeouts/errors, persist audits. | 🚧 Partial: timeout sweeper + audit worker live; still need admin surfacing + retention/governance.
 | 8 | Admin dashboard with filters | Vue admin surface for bookings + filters, audit log stream, role guarding. | ⏳ Planned.
 
 ## Running the Stack
@@ -123,7 +126,7 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 7. `DELETE /api/showtimes/:id/seats/lock` — releases the caller’s seat locks.
 8. `GET /api/showtimes/:id/seats/locks` — debug listing of current locks (admin scoping still needed).
 9. `POST /api/showtimes/:id/bookings/confirm` — mock payment + booking persistence that atomically flips locks to booked seats.
-10. `GET /ws/showtimes/:id/seats?token=JWT` — WebSocket streaming seat lock/release/book events from Redis Pub/Sub (needs origin/token hardening).
+10. `GET /ws/showtimes/:id/seats?token=JWT` — WebSocket streaming seat lock/release/book/timeout events from Redis Pub/Sub (needs origin/token hardening).
 
 ### Public/User APIs (planned)
 1. `GET /api/showtimes/:id/seat-map` — cached seat layout with AVAILABLE/LOCKED/BOOKED status.
@@ -138,11 +141,16 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 3. `GET /api/admin/health` — dependency status & build metadata.
 
 ### Event & Locking Strategy
-- Seat selection triggers a Lua-powered `SET` with PX TTL keyed as `seatlock:<showtimeId>:<seatId>` so locks are atomic, deduped, and expire in ~5 minutes.
-- Booking confirmation runs another Lua script that ensures no `seatbooked:*` keys exist yet, validates ownership (`owner:requestID`), creates `seatbooked:*` markers, and deletes the original locks.
-- Every lock/release/booked transition emits a JSON payload on `seat-events:<showtimeId>`; `/ws/showtimes/:id/seats` streams that channel to connected browsers.
+- Seat selection triggers a Lua-powered `SET` with PX TTL keyed as `seatlock:<showtimeId>:<seatId>` and records an expiry marker in `seatlockexp:<showtimeId>` with payload `seat|owner|requestId` so locks are atomic, deduped, and sweepable.
+- `seatlock.StartTimeoutSweeper` scans the `seatlockexp:*` sorted sets, pops due members, checks whether the seat is still locked/booked, and emits `seat.timeout` events when a hold lapses.
+- Booking confirmation runs another Lua script that ensures no `seatbooked:*` keys exist yet, validates ownership (`owner:requestID`), creates `seatbooked:*` markers, and deletes the original locks plus expiry markers.
+- Every lock/release/booked/timeout transition emits a JSON payload on `seat-events:<showtimeId>`; `/ws/showtimes/:id/seats` streams that channel to connected browsers.
 - Booking success also emits `booking.success` on the `booking-events` channel for notification workers / audit logging.
-- Audit service + timeout sweeper are still planned; today no background job cleans up expired holds or writes an audit log.
+
+-## Background Workers
+- **Timeout sweeper** (`internal/seatlock/timeout_sweeper.go`): runs every second, scans `seatlockexp:*`, republishes due members if their TTL was refreshed, or emits `seat.timeout` events when a hold disappears without being booked.
+- **Audit worker** (`internal/audit/worker.go`): `PSubscribe`s to `seat-events:*` + `booking-events`, normalizes them into `seat.*` / `booking.*` audit documents, and inserts them into Mongo via `repo.AuditRepo`.
+- Both workers currently run in-process (see `cmd/api/main.go`) and inherit the API’s lifecycle; plan for graceful shutdown, observability, and horizontal scale when splitting into dedicated services.
 
 ## Frontend Responsibilities
 - **User surface**: showtime browser, live seat map (WebSocket), booking funnel with payment placeholder, countdown timer for held seats — today only the SeatEventsCard dev tool exists, so the real UX is still to build.
@@ -155,6 +163,7 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 - Mongo data persisted using the `mongo_data` named volume; remove it manually when you need a clean slate.
 - Logging will standardize on structured JSON (`LOG_LEVEL`) with trace IDs to correlate booking + audit events.
 - Future CI should run `go test ./...`, `npm run build`, and a docker buildx pipeline to keep images reproducible.
+- The API process double-duties background jobs (timeout sweeper + audit worker). Plan for graceful shutdown hooks and eventually separating them into their own deployments if they grow heavier.
 
 ## Compliance Checklist vs Requirements
 | Area | Status | Notes |
@@ -163,8 +172,8 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 | Seat Map (Real-time) | 🚧 Partial | Redis Pub/Sub + WebSocket streaming in place; need seat-map query API + real UI. |
 | Booking Flow + 5-min Lock | 🚧 Partial | Lock + confirm API exists; still need booking creation/cancel endpoints and rollback on DB failure. |
 | Admin Dashboard + Filters | Planned | Frontend scaffolding ready; API + UI components queued. |
-| Audit Logs | Planned | To be stored in Mongo + mirrored via Pub/Sub events. |
-| Message Queue Usage | 🚧 Partial | `seat-events:*` + `booking-events` exist; worker/audit consumers still TBD. |
+| Audit Logs | 🚧 Partial | Seat + booking events persist to Mongo via the audit worker; need APIs/retention/alerting. |
+| Message Queue Usage | 🚧 Partial | `seat-events:*` + `booking-events` exist, audit worker consumes them; notification worker still TBD. |
 | Concurrency / Double Booking Guards | 🚧 Partial | Lua seat locks/booked markers exist but there is no TTL sweeper or audit hookup yet. |
 | Security / Roles | 🚧 Partial | JWT middleware guards REST APIs, but OAuth state/PKCE, debug lock list, and WebSocket token/origin handling remain to-do. |
 | DevOps (single-command compose) | ✅ | `docker compose up --build` brings entire stack online. |
@@ -172,10 +181,10 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 
 ## Next Steps
 1. Replace the committed `.env` with an `.env.example`, rotate all secrets, and harden auth: random OAuth `state` + PKCE + nonce, reject `/auth/callback?error`, move WebSocket auth to headers, and enforce `CheckOrigin`.
-2. Lock down operational endpoints (e.g., `/api/showtimes/:id/seats/locks`) so only admins or internal tooling can view lock owners/request IDs; add structured audit logging instead.
-3. Design and implement Mongo collections + repositories for Movie, Showtime, SeatMap, and user-visible booking flows (create/cancel/list) so the confirm endpoint has real inventory to protect.
-4. Fix the booking rollback story: if Mongo updates fail after Redis marks seats as booked, delete/retry affected `seatbooked:*` keys, emit compensating events, and add background sweepers.
-5. Build the real seat-map + booking UI, admin dashboards, and add automated tests (seat lock Lua flows, booking repo transitions, OAuth handlers) plus Postman/happy-path integration suites and CI wiring.
+2. Lock down operational endpoints (e.g., `/api/showtimes/:id/seats/locks`) so only admins or internal tooling can view lock owners/request IDs; expose the same data via structured audit logs instead.
+3. Design and implement Mongo collections + repositories for Movie, Showtime, SeatMap, and booking lifecycle APIs (create/cancel/list/seat-map) so the lock/booking/audit flows operate on real inventory.
+4. Fix the booking rollback story: if Mongo updates fail after Redis marks seats as booked, delete/retry affected `seatbooked:*` keys, emit compensating events, and wire timeout sweeps into audit + alerting.
+5. Build the real seat-map + booking UI, admin dashboards, audit log surfaces, and add automated tests (seat lock Lua flows, booking repo transitions, OAuth handlers) plus Postman/happy-path integration suites and CI wiring.
 
 ---
 Questions or suggestions? Open an issue or ping the team on Slack `#cinema-ticket-booking`.
