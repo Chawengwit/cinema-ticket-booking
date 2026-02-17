@@ -7,6 +7,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 - Google OAuth login + callback persist Google profiles in Mongo, mint JWTs, and expose `/api/me` + `/api/admin/ping` so the Vue shell can show who is signed in.
 - Seat locking and booking finalization are wired end-to-end: Redis Lua scripts lock seats, `POST /api/showtimes/:id/bookings/confirm` creates Mongo bookings, and `booking-events` + `seat-events` channels broadcast outcomes.
 - Background services now run alongside the API: `seatlock.StartTimeoutSweeper` watches `seatlockexp:*` zsets to emit `seat.timeout` events when holds lapse, and `internal/audit.Run` subscribes to the Redis channels to persist audit logs in Mongo.
+- Admin APIs (`GET /api/admin/bookings`, `GET /api/admin/audit`, `/api/admin/ping`) ship with Mongo filters + pagination, and Google OAuth now promotes accounts in the `ADMIN_EMAILS` allowlist to the ADMIN role on sign-in.
 - A WebSocket endpoint (`/ws/showtimes/:id/seats`) streams seat lock/release/booked/timeout events via Redis Pub/Sub, and the Vue `SeatEventsCard` demonstrates connecting, locking demo seats, and inspecting the feed.
 - Docker Compose + Vite proxy still provide one-command local orchestration, and the SPA handles OAuth callbacks plus health-check surfacing for smoke tests.
 
@@ -16,6 +17,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 - `GET /api/showtimes/:id/seats/locks` is a debug endpoint that any authenticated user can hit and currently leaks lock owners/request IDs (`backend/internal/http/handler/seat_lock.go:134-151`); restrict it to admins or drop it before production.
 - The WebSocket gateway accepts JWTs via the query string and unconditionally bypasses origin checks (`backend/internal/http/handler/ws_seats.go:24-49`), so access tokens are exposed in logs and cross-origin callers can subscribe; switch to headers + strict `CheckOrigin`.
 - When `MarkBooked` fails after Redis marked seats as booked, the code marks the booking as FAILED but never deletes the `seatbooked:*` keys (`backend/internal/http/handler/booking_confirm.go:125-129`), leaving those seats permanently blocked; add a rollback/retry path.
+- `ADMIN_EMAILS` currently promotes accounts at login but there is no runtime auditing or alerting if a wrong email is added; treat the env var like a secret, document rotation, and add admin-management tooling instead of shipping a static list.
 - No automated tests exist yet; start with table-driven tests for the seat lock Lua scripts, booking repository transitions, and the OAuth/seat APIs.
 
 ## Requirements Snapshot
@@ -62,9 +64,10 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 - ✅ Seat locking + release handlers run on Redis Lua scripts with TTLs, request IDs, audit-friendly payloads, and WebSocket fan-out.
 - ✅ Booking confirmation API (`POST /api/showtimes/:id/bookings/confirm`) persists PENDING → BOOKED rows in Mongo and emits `booking-events`.
 - ✅ Background timeout sweeper + audit worker run beside the API to publish `seat.timeout` events and store seat/booking activity in Mongo.
+- ✅ Admin listing APIs (`GET /api/admin/bookings`, `GET /api/admin/audit`, `/api/admin/ping`) are live and locked behind the ADMIN role for future dashboards.
 - ✅ Vue SPA handles OAuth callback tokens, login/logout state, health checks, and includes a SeatEventsCard to demo the WebSocket feed.
 - ⏳ Still to build: real seat-map/query APIs, domain aggregates (Movie/Showtime/Seat/Booking inventory), and the pre-payment booking flow.
-- 🔜 Still pending: resilient WebSocket auth/origin controls, audit-log ingestion, admin dashboard, notification worker, and integration tests.
+- 🔜 Still pending: resilient WebSocket auth/origin controls, admin dashboards/UX, notification worker, and integration tests.
 
 ## Delivery Roadmap & Checkpoints
 | # | Checkpoint | Target Outcome | Status |
@@ -76,7 +79,7 @@ Cinema Ticket Booking is a full-stack reference implementation for a high-concur
 | 5 | WebSocket broadcast for seat status changes | Real-time push (WS/SSE) wired to Redis Pub/Sub for seat map updates. | 🚧 Backend streaming + sample Vue card done; production auth/origin hardening + seat UI pending.
 | 6 | Booking confirmation (mock payment) → BOOKED + Pub/Sub event | Finalize booking, persist to Mongo, emit success event for notifications. | 🚧 API + repo exist (mock payment); needs error rollback + real payment adapter.
 | 7 | Timeout handling + seat release + audit logs | Background/job flow to release expired locks, log timeouts/errors, persist audits. | 🚧 Partial: timeout sweeper + audit worker live; still need admin surfacing + retention/governance.
-| 8 | Admin dashboard with filters | Vue admin surface for bookings + filters, audit log stream, role guarding. | ⏳ Planned.
+| 8 | Admin dashboard with filters | Vue admin surface for bookings + filters, audit log stream, role guarding. | 🚧 Partial: backend APIs live; frontend/dashboard still to build.
 
 ## Running the Stack
 ### 1. Prerequisites
@@ -96,6 +99,7 @@ Update the root `.env` file (already committed for local bootstrap) and adjust s
 | `FRONTEND_URL` / `CORS_ORIGINS` | Allowed origins for SPA + admin | `http://localhost:5173` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URL` | OAuth credentials | `<from Google Console>` |
 | `LOG_LEVEL` | `debug`, `info`, etc. | `debug` |
+| `ADMIN_EMAILS` | Comma-separated list of Google emails that should get ADMIN role | `ops@example.com,lead@example.com` |
 
 > ⚠️ The committed `.env` exists only for local bootstrap. Replace the secrets (`JWT_SECRET`, Google OAuth keys) with your own values before running anything outside a throwaway sandbox, and keep the real credentials out of source control.
 
@@ -122,11 +126,13 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 3. `GET /api/auth/google/callback` — exchanges code, upserts users, issues JWT, redirects back to the SPA.
 4. `GET /api/me` — returns the authenticated profile and role extracted from JWT claims.
 5. `GET /api/admin/ping` — sample ADMIN route guarded by role middleware.
-6. `POST /api/showtimes/:id/seats/lock` — acquires Redis-backed locks for seat IDs owned by the caller.
-7. `DELETE /api/showtimes/:id/seats/lock` — releases the caller’s seat locks.
-8. `GET /api/showtimes/:id/seats/locks` — debug listing of current locks (admin scoping still needed).
-9. `POST /api/showtimes/:id/bookings/confirm` — mock payment + booking persistence that atomically flips locks to booked seats.
-10. `GET /ws/showtimes/:id/seats?token=JWT` — WebSocket streaming seat lock/release/book/timeout events from Redis Pub/Sub (needs origin/token hardening).
+6. `GET /api/admin/bookings` — paginated admin view + filters backed by Mongo indexes.
+7. `GET /api/admin/audit` — paginated audit log feed sourced from Redis → Mongo worker.
+8. `POST /api/showtimes/:id/seats/lock` — acquires Redis-backed locks for seat IDs owned by the caller.
+9. `DELETE /api/showtimes/:id/seats/lock` — releases the caller’s seat locks.
+10. `GET /api/showtimes/:id/seats/locks` — debug listing of current locks (admin scoping still needed).
+11. `POST /api/showtimes/:id/bookings/confirm` — mock payment + booking persistence that atomically flips locks to booked seats.
+12. `GET /ws/showtimes/:id/seats?token=JWT` — WebSocket streaming seat lock/release/book/timeout events from Redis Pub/Sub (needs origin/token hardening).
 
 ### Public/User APIs (planned)
 1. `GET /api/showtimes/:id/seat-map` — cached seat layout with AVAILABLE/LOCKED/BOOKED status.
@@ -135,10 +141,10 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 4. `DELETE /api/bookings/:id` — release lock (user abandon) and emit timeout event.
 5. `GET /api/bookings/me` — list user bookings for the SPA/account center.
 
-### Admin APIs (planned)
-1. `GET /api/admin/bookings?movie=&date=&user=` — filterable list.
-2. `GET /api/admin/audit` — paginated audit log feed.
-3. `GET /api/admin/health` — dependency status & build metadata.
+### Admin APIs
+1. `GET /api/admin/bookings?showtime_id=&status=&user_id=&from=&to=&limit=&skip=` — filterable list backed by Mongo and protected by the ADMIN role.
+2. `GET /api/admin/audit?type=&showtime_id=&user_id=&booking_id=&from=&to=` — paginated audit log feed.
+3. `GET /api/admin/health` — planned dependency status & build metadata endpoint (still to-do).
 
 ### Event & Locking Strategy
 - Seat selection triggers a Lua-powered `SET` with PX TTL keyed as `seatlock:<showtimeId>:<seatId>` and records an expiry marker in `seatlockexp:<showtimeId>` with payload `seat|owner|requestId` so locks are atomic, deduped, and sweepable.
@@ -147,7 +153,7 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 - Every lock/release/booked/timeout transition emits a JSON payload on `seat-events:<showtimeId>`; `/ws/showtimes/:id/seats` streams that channel to connected browsers.
 - Booking success also emits `booking.success` on the `booking-events` channel for notification workers / audit logging.
 
--## Background Workers
+## Background Workers
 - **Timeout sweeper** (`internal/seatlock/timeout_sweeper.go`): runs every second, scans `seatlockexp:*`, republishes due members if their TTL was refreshed, or emits `seat.timeout` events when a hold disappears without being booked.
 - **Audit worker** (`internal/audit/worker.go`): `PSubscribe`s to `seat-events:*` + `booking-events`, normalizes them into `seat.*` / `booking.*` audit documents, and inserts them into Mongo via `repo.AuditRepo`.
 - Both workers currently run in-process (see `cmd/api/main.go`) and inherit the API’s lifecycle; plan for graceful shutdown, observability, and horizontal scale when splitting into dedicated services.
@@ -171,11 +177,11 @@ This brings up Mongo, Redis, the Go API (port 8080), and the Vite dev server (po
 | Authentication (Google OAuth 2.0) | 🚧 Alpha | Login/callback + JWT issuance work; add state/PKCE/nonce + refresh/token rotation. |
 | Seat Map (Real-time) | 🚧 Partial | Redis Pub/Sub + WebSocket streaming in place; need seat-map query API + real UI. |
 | Booking Flow + 5-min Lock | 🚧 Partial | Lock + confirm API exists; still need booking creation/cancel endpoints and rollback on DB failure. |
-| Admin Dashboard + Filters | Planned | Frontend scaffolding ready; API + UI components queued. |
+| Admin Dashboard + Filters | 🚧 Partial | Backend listing/audit APIs live; frontend dashboards + UX still pending. |
 | Audit Logs | 🚧 Partial | Seat + booking events persist to Mongo via the audit worker; need APIs/retention/alerting. |
 | Message Queue Usage | 🚧 Partial | `seat-events:*` + `booking-events` exist, audit worker consumes them; notification worker still TBD. |
-| Concurrency / Double Booking Guards | 🚧 Partial | Lua seat locks/booked markers exist but there is no TTL sweeper or audit hookup yet. |
-| Security / Roles | 🚧 Partial | JWT middleware guards REST APIs, but OAuth state/PKCE, debug lock list, and WebSocket token/origin handling remain to-do. |
+| Concurrency / Double Booking Guards | 🚧 Partial | Lua seat locks/booked markers + timeout sweeper exist; still need booking rollback + continuous validation. |
+| Security / Roles | 🚧 Partial | JWT middleware + ADMIN_EMAILS allowlist work, but OAuth state/PKCE, debug lock list, and WebSocket token/origin handling remain to-do. |
 | DevOps (single-command compose) | ✅ | `docker compose up --build` brings entire stack online. |
 | Optional (Postman/Test/Notification) | Planned | Postman + mock notifier to be added alongside first functional endpoint. |
 
