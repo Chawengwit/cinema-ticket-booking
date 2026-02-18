@@ -16,7 +16,6 @@ type Movie = {
   showtimes: { id: string; label: string }[];
 };
 
-// ✅ showtime_id ที่มีจริง
 const movies = ref<Movie[]>([
   {
     id: "MOV1",
@@ -56,86 +55,109 @@ function wsBase(url: string) {
   return url.replace(/^http/, "ws");
 }
 
-// ===== seats =====
 type SeatStatus = "FREE" | "LOCKED" | "BOOKED";
-type Seat = { id: string; row: string; num: number; status: SeatStatus; owner?: string; ttl?: number };
+type Seat = { id: string; row: string; num: number; status: SeatStatus; owner?: string };
 
 const seatRows = ["A", "B", "C", "D", "E"];
 const seatCols = 10;
 
 function buildSeats(): Seat[] {
   const out: Seat[] = [];
-  for (const r of seatRows) for (let n = 1; n <= seatCols; n++) out.push({ id: `${r}${n}`, row: r, num: n, status: "FREE" });
+  for (const r of seatRows)
+    for (let n = 1; n <= seatCols; n++) out.push({ id: `${r}${n}`, row: r, num: n, status: "FREE" });
   return out;
 }
 
 const seats = ref<Seat[]>(buildSeats());
 
-// picked = เลือกในหน้า pick_seats (ยังไม่ล็อก)
 const picked = ref<string[]>([]);
-
-// lockedSeats = ชุดที่ “ล็อกแล้ว” และกำลังจะจ่าย
 const lockedSeats = ref<string[]>([]);
 
 const busy = ref(false);
 const error = ref<string | null>(null);
 
 const wsConnected = ref(false);
-const wsLogs = ref<string[]>([]);
 let ws: WebSocket | null = null;
 
-const lockRequestId = ref<string>(""); // ✅ ใช้ของ backend
+const lockRequestId = ref<string>("");
 const paymentRef = ref("");
 const bookingId = ref("");
 const doneMessage = ref("");
 
-function resetFlow() {
-  step.value = "pick_movie";
-  selectedMovieId.value = "";
-  selectedShowtimeId.value = "";
-  seats.value = buildSeats();
-  picked.value = [];
-  lockedSeats.value = [];
-  lockRequestId.value = "";
-  paymentRef.value = "";
-  bookingId.value = "";
-  doneMessage.value = "";
-  error.value = null;
-  wsLogs.value = [];
-  disconnectWS();
-}
-
 function genPaymentRef() {
   return "PAY-" + Math.random().toString(16).slice(2).toUpperCase();
+}
+
+/**
+ * ✅ Auto sync seat state:
+ * - locks: seatlock:showtime:*
+ * - booked: seatbooked:showtime:*
+ */
+async function syncSeatState() {
+  if (!props.isAuthed || !selectedShowtimeId.value) return;
+
+  try {
+    const res = await fetch(
+      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats/state`,
+      { headers: authHeaders() }
+    );
+    const data = await res.json().catch(() => ({} as any));
+    if (!res.ok || !data?.ok) return;
+
+    // reset to FREE
+    for (const s of seats.value) {
+      s.status = "FREE";
+      s.owner = undefined;
+    }
+
+    // apply booked first
+    const booked: string[] = Array.isArray(data.booked) ? data.booked : [];
+    for (const id of booked) {
+      const s = seats.value.find((x) => x.id === id);
+      if (s) {
+        s.status = "BOOKED";
+        s.owner = undefined;
+      }
+    }
+
+    // apply locks
+    const locks = Array.isArray(data.locks) ? data.locks : [];
+    for (const l of locks) {
+      const sid = l.seat_id;
+      const s = seats.value.find((x) => x.id === sid);
+      if (s && s.status !== "BOOKED") {
+        s.status = "LOCKED";
+        s.owner = l.owner;
+      }
+    }
+
+    // clean picked if became not FREE
+    picked.value = picked.value.filter((id) => seats.value.find((s) => s.id === id)?.status === "FREE");
+  } catch {}
 }
 
 function seatClass(s: Seat) {
   const isPicked = picked.value.includes(s.id);
   const isLockedForPay = lockedSeats.value.includes(s.id);
 
-  const base = "h-10 w-10 rounded-xl text-xs font-semibold flex items-center justify-center select-none ring-1 transition";
+  const base =
+    "h-10 w-10 rounded-xl text-xs font-semibold flex items-center justify-center select-none ring-1 transition";
 
-  if (s.status === "BOOKED")
-    return `${base} bg-rose-500/15 text-rose-200 ring-rose-400/20 cursor-not-allowed`;
-
-  // “LOCKED (ME)” highlight
-  if (isLockedForPay)
-    return `${base} bg-emerald-500/18 text-emerald-200 ring-emerald-400/25 cursor-not-allowed`;
-
-  if (s.status === "LOCKED")
-    return `${base} bg-amber-500/15 text-amber-200 ring-amber-400/20 cursor-not-allowed`;
-
-  if (isPicked)
-    return `${base} bg-emerald-500/20 text-emerald-200 ring-emerald-400/30 hover:bg-emerald-500/25 cursor-pointer`;
-
+  if (s.status === "BOOKED") return `${base} bg-rose-500/15 text-rose-200 ring-rose-400/20 cursor-not-allowed`;
+  if (isLockedForPay) return `${base} bg-emerald-500/18 text-emerald-200 ring-emerald-400/25 cursor-not-allowed`;
+  if (s.status === "LOCKED") return `${base} bg-amber-500/15 text-amber-200 ring-amber-400/20 cursor-not-allowed`;
+  if (isPicked) return `${base} bg-emerald-500/20 text-emerald-200 ring-emerald-400/30 hover:bg-emerald-500/25 cursor-pointer`;
   return `${base} bg-white/5 text-white ring-white/10 hover:bg-white/10 cursor-pointer`;
 }
 
 function toggleSeat(id: string) {
   const s = seats.value.find((x) => x.id === id);
   if (!s) return;
-
   if (step.value !== "pick_seats") return;
+
+  // ถ้ามี lockedSeats อยู่แล้ว ให้ user ไปจ่ายหรือยกเลิกก่อน (กัน state ซ้อน)
+  if (lockedSeats.value.length > 0) return;
+
   if (s.status !== "FREE") return;
 
   const idx = picked.value.indexOf(id);
@@ -143,46 +165,7 @@ function toggleSeat(id: string) {
   else picked.value.push(id);
 }
 
-// =======================
-// ✅ Refresh current locks
-// =======================
-async function refreshLocks() {
-  if (!props.isAuthed || !selectedShowtimeId.value) return;
-
-  try {
-    const res = await fetch(
-      `${props.apiOrigin}/api/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats/locks`,
-      { headers: authHeaders() }
-    );
-    const data = await res.json().catch(() => ({} as any));
-    if (!res.ok || !data?.ok) return;
-
-    for (const s of seats.value) {
-      if (s.status !== "BOOKED") {
-        s.status = "FREE";
-        s.owner = undefined;
-        s.ttl = undefined;
-      }
-    }
-
-    for (const l of data.locks || []) {
-      const sid = l.seat_id;
-      const s = seats.value.find((x) => x.id === sid);
-      if (s && s.status !== "BOOKED") {
-        s.status = "LOCKED";
-        s.owner = l.owner;
-        s.ttl = l.ttl_seconds;
-      }
-    }
-
-    // ถ้า seat ที่ user กำลังเลือก ถูก lock/Booked ไปแล้ว ให้เอาออกจาก picked
-    picked.value = picked.value.filter((id) => seats.value.find((s) => s.id === id)?.status === "FREE");
-  } catch {}
-}
-
-// =======================
-// ✅ WebSocket handling
-// =======================
+// ===== WebSocket =====
 function applyEvent(type: string, seatIds: string[], owner?: string) {
   for (const id of seatIds) {
     const s = seats.value.find((x) => x.id === id);
@@ -209,27 +192,22 @@ function connectWS() {
   if (!token.value || !selectedShowtimeId.value) return;
   if (ws) ws.close();
 
-  const url = `${wsBase(props.apiOrigin)}/ws/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats?token=${encodeURIComponent(token.value)}`;
+  const url = `${wsBase(props.apiOrigin)}/ws/showtimes/${encodeURIComponent(selectedShowtimeId.value)}/seats?token=${encodeURIComponent(
+    token.value
+  )}`;
   ws = new WebSocket(url);
 
   ws.onopen = async () => {
     wsConnected.value = true;
-    wsLogs.value.unshift(`[ws] connected ${selectedShowtimeId.value}`);
-    await refreshLocks();
+    // ✅ สำคัญ: connect แล้ว sync state ทันที
+    await syncSeatState();
   };
 
   ws.onclose = () => {
     wsConnected.value = false;
-    wsLogs.value.unshift("[ws] disconnected");
-  };
-
-  ws.onerror = () => {
-    wsLogs.value.unshift("[ws] error");
   };
 
   ws.onmessage = (ev) => {
-    wsLogs.value.unshift(ev.data);
-
     try {
       const msg = JSON.parse(ev.data);
       const type = String(msg?.type || "");
@@ -239,7 +217,7 @@ function connectWS() {
       if (type && Array.isArray(seatIds) && seatIds.length > 0) {
         applyEvent(type, seatIds, owner);
 
-        // ✅ ล้าง picked เฉพาะตอนอยู่หน้า pick_seats
+        // กัน user เลือกทับ (เฉพาะตอน pick_seats)
         if (step.value === "pick_seats" && (type === "locked" || type === "booked")) {
           picked.value = picked.value.filter((id) => !seatIds.includes(id));
         }
@@ -256,9 +234,7 @@ function disconnectWS() {
 
 onBeforeUnmount(() => disconnectWS());
 
-// =======================
-// Step transitions
-// =======================
+// ===== Step transitions =====
 function goPickSeats() {
   error.value = null;
   if (!props.isAuthed) {
@@ -272,6 +248,7 @@ function goPickSeats() {
   step.value = "pick_seats";
 }
 
+// เปลี่ยน showtime => reset state & connect ws & sync
 watch(selectedShowtimeId, async () => {
   seats.value = buildSeats();
   picked.value = [];
@@ -281,21 +258,28 @@ watch(selectedShowtimeId, async () => {
   bookingId.value = "";
   doneMessage.value = "";
   error.value = null;
-  wsLogs.value = [];
 
   disconnectWS();
   if (props.isAuthed && selectedShowtimeId.value) {
     connectWS();
-    await refreshLocks();
+    await syncSeatState();
   }
 });
 
-// =======================
-// API actions
-// =======================
+// ✅ ทุกครั้งที่เข้าหน้า pick_seats ให้ sync สี (แก้บัคข้อ 1)
+watch(step, async (s) => {
+  if (s === "pick_seats" && selectedShowtimeId.value) {
+    await syncSeatState();
+  }
+});
+
+// ===== API actions =====
 async function lockSeats() {
   error.value = null;
-  if (!props.isAuthed || !selectedShowtimeId.value || picked.value.length === 0) return;
+  if (!props.isAuthed || !selectedShowtimeId.value) return;
+
+  const seatsToLock = [...picked.value].sort();
+  if (seatsToLock.length === 0) return;
 
   busy.value = true;
   try {
@@ -304,32 +288,25 @@ async function lockSeats() {
       {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" } as any,
-        body: JSON.stringify({ seat_ids: picked.value }),
+        body: JSON.stringify({ seat_ids: seatsToLock }),
       }
     );
 
     const data = await res.json().catch(() => ({} as any));
-
-    if (res.status === 409) {
-      await refreshLocks();
-      const conflicted = (data?.conflicted || []).join(", ");
-      throw new Error(conflicted ? `seats_unavailable: ${conflicted}` : "seats_unavailable");
-    }
-
+    if (res.status === 409) throw new Error(data?.error || "seats_unavailable");
     if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP_${res.status}`);
 
     lockRequestId.value = data.request_id;
-
-    // ✅ lock ชุดที่จะจ่าย และ generate paymentRef อัตโนมัติ
-    lockedSeats.value = [...picked.value];
+    lockedSeats.value = seatsToLock;
     paymentRef.value = genPaymentRef();
 
-    applyEvent("locked", lockedSeats.value, "me");
+    applyEvent("locked", seatsToLock, "me");
     picked.value = [];
-
     step.value = "pay";
   } catch (e: any) {
     error.value = e?.message ?? "Lock seats failed";
+    // ถ้า lock fail -> sync ใหม่ให้เห็นสีจริง
+    await syncSeatState();
   } finally {
     busy.value = false;
   }
@@ -337,7 +314,8 @@ async function lockSeats() {
 
 async function releaseSeats() {
   error.value = null;
-  if (!props.isAuthed || !selectedShowtimeId.value || lockedSeats.value.length === 0) return;
+  if (!props.isAuthed || !selectedShowtimeId.value) return;
+  if (lockedSeats.value.length === 0) return;
 
   busy.value = true;
   try {
@@ -354,13 +332,12 @@ async function releaseSeats() {
     if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP_${res.status}`);
 
     applyEvent("released", lockedSeats.value);
-
     lockedSeats.value = [];
     lockRequestId.value = "";
     paymentRef.value = "";
-
     step.value = "pick_seats";
-    await refreshLocks();
+
+    await syncSeatState();
   } catch (e: any) {
     error.value = e?.message ?? "Release failed";
   } finally {
@@ -370,11 +347,10 @@ async function releaseSeats() {
 
 async function confirmBooking() {
   error.value = null;
-  if (!props.isAuthed || !selectedShowtimeId.value || lockedSeats.value.length === 0) return;
+  if (!props.isAuthed || !selectedShowtimeId.value) return;
+  if (lockedSeats.value.length === 0) return;
 
-  // ✅ กันเคส paymentRef ว่าง (ถึงแม้ตอน lock จะ gen ให้แล้ว)
   if (!paymentRef.value) paymentRef.value = genPaymentRef();
-
   if (!lockRequestId.value) {
     error.value = "Missing request_id. Please lock again.";
     return;
@@ -396,10 +372,7 @@ async function confirmBooking() {
     );
 
     const data = await res.json().catch(() => ({} as any));
-    if (!res.ok || !data?.ok) {
-      await refreshLocks();
-      throw new Error(data?.error || `HTTP_${res.status}`);
-    }
+    if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP_${res.status}`);
 
     bookingId.value = data.booking_id || data.id || "";
     doneMessage.value = "Booking completed successfully.";
@@ -409,9 +382,35 @@ async function confirmBooking() {
     step.value = "done";
   } catch (e: any) {
     error.value = e?.message ?? "Confirm booking failed";
+    await syncSeatState();
   } finally {
     busy.value = false;
   }
+}
+
+// ✅ Back rules:
+// - จาก pay -> กลับ pick_seats (ไม่กลับ movie) เพื่อไม่ให้ state หลุด (แก้บัคข้อ 2)
+function back() {
+  if (step.value === "pay") {
+    step.value = "pick_seats";
+    return;
+  }
+  step.value = "pick_movie";
+}
+
+function startNewBooking() {
+  step.value = "pick_movie";
+  selectedMovieId.value = "";
+  selectedShowtimeId.value = "";
+  seats.value = buildSeats();
+  picked.value = [];
+  lockedSeats.value = [];
+  lockRequestId.value = "";
+  paymentRef.value = "";
+  bookingId.value = "";
+  doneMessage.value = "";
+  error.value = null;
+  disconnectWS();
 }
 </script>
 
@@ -428,13 +427,9 @@ async function confirmBooking() {
         <span class="pill" :class="step==='done' ? 'text-white border border-white/20' : 'text-slate-300 border border-white/10'">4) Done</span>
       </div>
 
-      <div class="flex items-center gap-2">
-        <span class="pill" :class="wsConnected ? 'text-emerald-200 border border-emerald-400/20' : 'text-slate-300 border border-white/10'">
-          {{ wsConnected ? "Live events: ON" : "Live events: OFF" }}
-        </span>
-        <button class="btn btn-secondary" @click="refreshLocks" :disabled="busy || !selectedShowtimeId">Refresh</button>
-        <button class="btn btn-secondary" @click="resetFlow" :disabled="busy">Reset</button>
-      </div>
+      <span class="pill" :class="wsConnected ? 'text-emerald-200 border border-emerald-400/20' : 'text-slate-300 border border-white/10'">
+        {{ wsConnected ? "Live events: ON" : "Live events: OFF" }}
+      </span>
     </div>
 
     <div v-if="error" class="alert alert-error">{{ error }}</div>
@@ -478,9 +473,7 @@ async function confirmBooking() {
         </div>
 
         <div class="flex items-center justify-between gap-3">
-          <div class="text-xs text-slate-400">
-            Login required: <span class="font-mono">{{ props.isAuthed ? "YES" : "NO" }}</span>
-          </div>
+          <div class="text-xs text-slate-400">Login required: <span class="font-mono">{{ props.isAuthed ? "YES" : "NO" }}</span></div>
           <button class="btn btn-primary" @click="goPickSeats" :disabled="!props.isAuthed || !selectedShowtimeId">
             Continue to seat selection
           </button>
@@ -488,7 +481,7 @@ async function confirmBooking() {
       </div>
     </div>
 
-    <!-- Seat grid for seats/pay/done -->
+    <!-- Seats / Pay / Done -->
     <div v-else class="space-y-4">
       <div class="card-muted">
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -504,9 +497,6 @@ async function confirmBooking() {
           <div class="flex items-center gap-2">
             <span class="pill text-slate-200 border border-white/10">Picked: {{ picked.length }}</span>
             <span class="pill text-slate-200 border border-white/10">Locked: {{ lockedSeats.length }}</span>
-            <button class="btn btn-secondary" @click="picked = []" :disabled="busy || picked.length === 0 || step !== 'pick_seats'">
-              Clear
-            </button>
           </div>
         </div>
 
@@ -546,24 +536,39 @@ async function confirmBooking() {
         <!-- Actions -->
         <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
           <div class="text-xs text-slate-400">
-            If you get 409 seats_unavailable: someone locked/booked it first. Click Refresh and pick another seat.
+            Note: 409 seats_unavailable means someone locked/booked it first — pick another seat.
           </div>
 
           <div class="flex gap-2">
-            <button class="btn btn-ghost" @click="step = 'pick_movie'" :disabled="busy">Back</button>
+            <button class="btn btn-ghost" @click="back" :disabled="busy">Back</button>
 
-            <button v-if="step==='pick_seats'" class="btn btn-primary" @click="lockSeats" :disabled="busy || picked.length===0">
+            <button
+              v-if="step==='pick_seats' && lockedSeats.length===0"
+              class="btn btn-primary"
+              @click="lockSeats"
+              :disabled="busy || picked.length===0"
+            >
               Lock & Continue
             </button>
 
+            <!-- ✅ ถ้ามี lockedSeats อยู่แล้วในหน้า pick_seats (เกิดจาก back จาก pay) ให้มีปุ่มไปจ่าย/ยกเลิก -->
+            <template v-if="step==='pick_seats' && lockedSeats.length>0">
+              <button class="btn btn-danger" @click="releaseSeats" :disabled="busy">Cancel & Release</button>
+              <button class="btn btn-primary" @click="step='pay'" :disabled="busy || !lockRequestId">Continue to Pay</button>
+            </template>
+
             <template v-else-if="step==='pay'">
-              <button class="btn btn-danger" @click="releaseSeats" :disabled="busy || lockedSeats.length===0">Cancel & Release</button>
-              <button class="btn btn-primary" @click="confirmBooking" :disabled="busy || lockedSeats.length===0">
+              <button class="btn btn-danger" @click="releaseSeats" :disabled="busy || lockedSeats.length===0">
+                Cancel & Release
+              </button>
+              <button class="btn btn-primary" @click="confirmBooking" :disabled="busy || lockedSeats.length===0 || !lockRequestId">
                 Pay & Confirm
               </button>
             </template>
 
-            <button v-else class="btn btn-primary" @click="resetFlow" :disabled="busy">Book another</button>
+            <button v-else-if="step==='done'" class="btn btn-primary" @click="startNewBooking" :disabled="busy">
+              Book another
+            </button>
           </div>
         </div>
 
@@ -590,24 +595,11 @@ async function confirmBooking() {
           </div>
           <div class="card-muted">
             <p class="text-xs uppercase text-slate-400">Booking ID</p>
-            <p class="text-white font-semibold mt-1 font-mono break-words">{{ bookingId || "-" }}</p>
+            <p class="text-white font-semibold mt-1 font-mono wrap-break-words">{{ bookingId || "-" }}</p>
           </div>
           <div class="card-muted">
             <p class="text-xs uppercase text-slate-400">Payment ref</p>
-            <p class="text-white font-semibold mt-1 font-mono break-words">{{ paymentRef || "-" }}</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Live events -->
-      <div class="card-muted">
-        <p class="text-sm font-semibold text-white mb-2">Live seat events</p>
-        <div class="rounded-2xl bg-slate-900/70 ring-1 ring-white/5 h-44 overflow-auto text-xs font-mono text-slate-100">
-          <div v-if="wsLogs.length === 0" class="p-4 text-slate-400">No events yet.</div>
-          <div v-else>
-            <div v-for="(l, idx) in wsLogs" :key="idx" class="border-b border-white/5 px-4 py-2">
-              {{ l }}
-            </div>
+            <p class="text-white font-semibold mt-1 font-mono wrap-break-words">{{ paymentRef || "-" }}</p>
           </div>
         </div>
       </div>

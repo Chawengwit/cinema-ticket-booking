@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -428,5 +429,37 @@ func (s *Service) ListLocks(ctx context.Context, showtimeID string) ([]LockInfo,
 		}
 	}
 
+	return out, nil
+}
+
+// Debug/dev: list booked seats for showtime
+func (s *Service) ListBookedSeats(ctx context.Context, showtimeID string) ([]string, error) {
+	pattern := fmt.Sprintf("seatbooked:%s:*", showtimeID)
+
+	var cursor uint64
+	out := make([]string, 0, 64)
+
+	for {
+		keys, next, err := s.rdb.Scan(ctx, cursor, pattern, 200).Result()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, k := range keys {
+			parts := strings.Split(k, ":")
+			if len(parts) >= 3 {
+				out = append(out, parts[len(parts)-1])
+			} else {
+				out = append(out, k)
+			}
+		}
+
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+
+	sort.Strings(out)
 	return out, nil
 }

@@ -150,3 +150,29 @@ func (h *SeatLockHandler) ListLocks(c *gin.Context) {
 		"locks":       locks,
 	})
 }
+
+func (h *SeatLockHandler) SeatState(c *gin.Context) {
+	showtimeID := c.Param("showtimeId")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+
+	locks, err := h.svc.ListLocks(ctx, showtimeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "list_failed"})
+		return
+	}
+
+	booked, err := h.svc.ListBookedSeats(ctx, showtimeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "list_failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"ok":          true,
+		"showtime_id": showtimeID,
+		"locks":       locks,
+		"booked":      booked,
+	})
+}

@@ -156,6 +156,7 @@ func main() {
 			st.POST("/seats/lock", seatLockHandler.Lock)
 			st.DELETE("/seats/lock", seatLockHandler.Release)
 			st.GET("/seats/locks", seatLockHandler.ListLocks)
+			st.GET("/seats/state", seatLockHandler.SeatState)
 
 			// Booking confirm
 			st.POST("/bookings/confirm", bookingHandler.Confirm)
